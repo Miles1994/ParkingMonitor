@@ -46,7 +46,7 @@ type TokenProxy struct {
 	stopOnce sync.Once
 }
 
-func (p *TokenProxy) Start(onToken func(string), onLog func(string), onStop func()) error {
+func (p *TokenProxy) Start(hostname string, onToken func(string), onLog func(string), onStop func()) error {
 	p.mu.Lock()
 	if p.running {
 		p.mu.Unlock()
@@ -64,7 +64,7 @@ func (p *TokenProxy) Start(onToken func(string), onLog func(string), onStop func
 
 	proxy := goproxy.NewProxyHttpServer()
 	proxy.Verbose = false
-	hostCond := goproxy.ReqHostMatches(regexp.MustCompile(`^gaoxin\.zimoiot\.com:443$`))
+	hostCond := goproxy.ReqHostMatches(regexp.MustCompile("^" + regexp.QuoteMeta(hostname) + ":443$"))
 	connectAction := &goproxy.ConnectAction{
 		Action:    goproxy.ConnectMitm,
 		TLSConfig: goproxy.TLSConfigFromCA(&ca),
@@ -76,7 +76,7 @@ func (p *TokenProxy) Start(onToken func(string), onLog func(string), onStop func
 
 	var once sync.Once
 	proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-		if req.URL != nil && req.URL.Hostname() == "gaoxin.zimoiot.com" {
+		if req.URL != nil && req.URL.Hostname() == hostname {
 			if token := req.Header.Get("Token"); token != "" {
 				once.Do(func() {
 					if onLog != nil {

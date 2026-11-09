@@ -80,7 +80,7 @@ func TestQueryLive(t *testing.T) {
 	if token == "" {
 		t.Skip("未设置 PARKING_TOKEN")
 	}
-	c := NewClient(token)
+	c := NewClient(token, regionByKey(os.Getenv("PARKING_REGION")))
 	res, err := c.Query(context.Background(), "京A12345")
 	if err != nil {
 		t.Fatal(err)

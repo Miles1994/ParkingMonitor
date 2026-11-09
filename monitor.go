@@ -79,7 +79,7 @@ type Monitor struct {
 func NewMonitor(cfg Config, onStatus func(MonitorStatus), onAlert func(AlertInfo), onEntry func(EntryInfo), onLog func(string)) *Monitor {
 	m := &Monitor{
 		cfg:      cfg,
-		client:   NewClient(cfg.Token),
+		client:   NewClient(cfg.Token, regionByKey(cfg.Region)),
 		phase:    "未开始",
 		onStatus: onStatus,
 		onAlert:  onAlert,

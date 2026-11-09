@@ -13,22 +13,20 @@ import (
 )
 
 const (
-	apiHost      = "https://gaoxin.zimoiot.com/"
-	appVersion   = "1.4.6"
-	subAppID     = "wx686363a14b08832e"
-	apiReferer   = "https://servicewechat.com/" + subAppID + "/60/page-frame.html"
 	apiUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 MicroMessenger/7.0.20.1781 NetType/WIFI MiniProgramEnv/Windows"
 )
 
 type Client struct {
-	token string
-	http  *http.Client
+	token  string
+	region Region
+	http   *http.Client
 }
 
-func NewClient(token string) *Client {
+func NewClient(token string, region Region) *Client {
 	return &Client{
-		token: token,
-		http:  &http.Client{Timeout: 15 * time.Second},
+		token:  token,
+		region: region,
+		http:   &http.Client{Timeout: 15 * time.Second},
 	}
 }
 
@@ -114,7 +112,7 @@ type apiResponse struct {
 }
 
 func (c *Client) call(ctx context.Context, path string, payload map[string]any, withToken bool) (*apiResponse, error) {
-	body, err := json.Marshal(mergeCommonPayload(payload))
+	body, err := json.Marshal(mergeCommonPayload(c.region, payload))
 	if err != nil {
 		return nil, err
 	}
@@ -127,13 +125,13 @@ func (c *Client) call(ctx context.Context, path string, payload map[string]any, 
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiHost+path, bytes.NewBufferString(encrypted))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.region.Host+path, bytes.NewBufferString(encrypted))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Api-Encrypt", "V2")
-	req.Header.Set("Referer", apiReferer)
+	req.Header.Set("Referer", c.region.Referer())
 	req.Header.Set("User-Agent", apiUserAgent)
 	if withToken && c.token != "" {
 		req.Header.Set("Token", c.token)
@@ -185,7 +183,7 @@ func (c *Client) call(ctx context.Context, path string, payload map[string]any, 
 	return out, nil
 }
 
-func mergeCommonPayload(payload map[string]any) map[string]any {
+func mergeCommonPayload(region Region, payload map[string]any) map[string]any {
 	merged := map[string]any{
 		"userid":     "",
 		"openId":     "",
@@ -193,10 +191,10 @@ func mergeCommonPayload(payload map[string]any) map[string]any {
 		"clienttype": 4,
 		"storeid":    "",
 		"paymode":    "WX_MP",
-		"subAppId":   subAppID,
+		"subAppId":   region.AppID,
 		"paytype":    "2",
-		"mchid":      "",
-		"version":    appVersion,
+		"mchid":      region.Mchid,
+		"version":    region.Version,
 	}
 	for k, v := range payload {
 		merged[k] = v

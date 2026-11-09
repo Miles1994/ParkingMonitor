@@ -7,6 +7,7 @@ import (
 )
 
 type Config struct {
+	Region          string `json:"region"`
 	Token           string `json:"token"`
 	Carno           string `json:"carno"`
 	IntervalMinutes int    `json:"interval_minutes"`
@@ -46,6 +47,9 @@ func loadConfig() Config {
 }
 
 func normalizeConfig(cfg *Config) {
+	if cfg.Region != "gaoxin" && cfg.Region != "lianhu" {
+		cfg.Region = "gaoxin"
+	}
 	if cfg.IntervalMinutes < 5 || cfg.IntervalMinutes > 1440 {
 		cfg.IntervalMinutes = 10
 	}

@@ -33,6 +33,7 @@ var (
 
 	intervalScope = tree.Sub(page, tree.Name("interval-select"))
 	freeScope     = tree.Sub(page, tree.Name("free-select"))
+	regionScope   = tree.Sub(page, tree.Name("region-select"))
 	unitScope     = tree.Sub(page, tree.Name("unit-select"))
 
 	dialogScope   = tree.Sub(page, tree.Name("dialog"))
@@ -74,7 +75,9 @@ type model struct {
 	intervalSel flex.SelectState
 	freeSel     flex.SelectState
 	unitSel     flex.SelectState
+	regionSel   flex.SelectState
 	unit        int
+	region      int
 
 	running bool
 	status  MonitorStatus
@@ -102,6 +105,7 @@ func newModel(cfg Config) *model {
 	if advUnit == "秒" {
 		m.unit = 1
 	}
+	m.region = regionIndex(cfg.Region)
 	m.status.Phase = "未开始"
 	return m
 }
@@ -207,6 +211,7 @@ func (m *model) collectConfig() (Config, error) {
 		return Config{}, errors.New("提前提醒时间不能大于免费时长")
 	}
 	return Config{
+		Region:          regionList[m.region].Key,
 		Token:           token,
 		Carno:           carno,
 		IntervalMinutes: interval,
@@ -310,9 +315,11 @@ func (m *model) captureToken() {
 		return
 	}
 
-	m.log("正在准备本地代理...")
+	region := regionList[m.region]
+	m.log("正在准备本地代理（" + region.Name + "）...")
 	go func() {
 		err := m.tokenProxy.Start(
+			region.Hostname,
 			func(token string) {
 				m.mu.Lock()
 				m.pendingToken = token
@@ -336,7 +343,7 @@ func (m *model) captureToken() {
 			return
 		}
 		m.showInfo("请在微信中操作一次",
-			"代理已启动。请打开“西高新智慧停车”小程序，进入“自助缴费”页面点一次“查询缴费”，工具会自动捕获 Token。\n获取成功或 3 分钟后自动关闭代理。")
+			"代理已启动。请打开“"+region.MiniName+"”小程序，进入“自助缴费”页面点一次“查询缴费”，工具会自动捕获 Token。\n获取成功或 3 分钟后自动关闭代理。")
 	}()
 }
 
@@ -385,6 +392,20 @@ func (m *model) paint(canvas *ui.Canvas, size ui.Size) {
 
 func (m *model) paintForm(f *flex.Frame, theme ui.Theme, running bool) {
 	f.Column().FillWidth().Background(theme.Card).Border(1, theme.Border).Radius(12).Pad(16).Gap(10).Children(func() {
+		f.Column().Gap(4).Children(func() {
+			f.Text("地区").FontSize(12).Muted()
+			if i, ok := f.Select(regionScope, &m.regionSel, regionNames, m.region).Picked(); ok {
+				if i != m.region {
+					m.region = i
+					m.tokenValue = ""
+					if m.running {
+						m.stopMonitor()
+					}
+					m.log("已切换到" + regionList[i].Name + "，请点击“点击获取”重新获取 Token")
+				}
+			}
+		})
+
 		f.Column().Gap(4).Children(func() {
 			f.Text("车牌号").FontSize(12).Muted()
 			f.Field(&m.carnoField, carnoFieldID, "车牌号", "例如：京A12345")
