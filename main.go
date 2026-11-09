@@ -39,11 +39,12 @@ var (
 	regionScope   = tree.Sub(page, tree.Name("region-select"))
 	unitScope     = tree.Sub(page, tree.Name("unit-select"))
 
-	dialogScope   = tree.Sub(page, tree.Name("dialog"))
-	dialogSurface = tree.ID(dialogScope, "surface")
-	dialogDismiss = tree.ID(dialogScope, "dismiss")
-	dialogOKID    = tree.ID(dialogScope, "ok")
-	dialogPaidID  = tree.ID(dialogScope, "paid")
+	dialogScope    = tree.Sub(page, tree.Name("dialog"))
+	dialogSurface  = tree.ID(dialogScope, "surface")
+	dialogDismiss  = tree.ID(dialogScope, "dismiss")
+	dialogOKID     = tree.ID(dialogScope, "ok")
+	dialogPaidID   = tree.ID(dialogScope, "paid")
+	dialogUpdateID = tree.ID(dialogScope, "update")
 
 	configScope   = tree.Sub(page, tree.Name("config-dialog"))
 	configSurface = tree.ID(configScope, "surface")
@@ -61,12 +62,14 @@ const (
 	alertInfo
 	alertEntry
 	alertFree
+	alertUpdate
 )
 
 type alertState struct {
 	kind    alertKind
 	title   string
 	message string
+	update  *updateInfo
 }
 
 type model struct {
@@ -86,12 +89,15 @@ type model struct {
 	unit        int
 	region      int
 
-	running    bool
-	status     MonitorStatus
-	logs       []string
-	alert      *alertState
-	configOpen bool
-	logScroll  flex.SliderState
+	running        bool
+	status         MonitorStatus
+	logs           []string
+	alert          *alertState
+	configOpen     bool
+	logScroll      flex.SliderState
+	pendingUpdate  *updateInfo
+	updatePrompted bool
+	updating       bool
 
 	tokenValue   string
 	pendingToken string
@@ -383,6 +389,17 @@ func (m *model) paint(canvas *ui.Canvas, size ui.Size) {
 	alert := m.alert
 	pendingToken := m.pendingToken
 	m.pendingToken = ""
+	pendingUpdate := m.pendingUpdate
+	m.pendingUpdate = nil
+	if pendingUpdate != nil && alert == nil {
+		alert = &alertState{
+			kind:    alertUpdate,
+			title:   "发现新版本 v" + pendingUpdate.Version,
+			message: updateMessage(pendingUpdate),
+			update:  pendingUpdate,
+		}
+		m.alert = alert
+	}
 	m.mu.Unlock()
 
 	if pendingToken != "" {
@@ -393,6 +410,7 @@ func (m *model) paint(canvas *ui.Canvas, size ui.Size) {
 		f.Column().Fill().Pad(20).Gap(12).Children(func() {
 			f.Row().FillWidth().Items(flex.Center).Gap(8).Children(func() {
 				f.Text("停车免费时长监控").Bold().FontSize(20)
+				f.Text("v" + appVersion).Muted().FontSize(12).Self(flex.Center)
 				f.Spacer()
 				if f.Button(startBtnID, "开始监控").Disabled(running).Clicked() {
 					m.startMonitor()
@@ -635,9 +653,21 @@ func (m *model) paintDialog(f *flex.Frame, alert *alertState) {
 		CloseID:   dialogDismiss,
 	})
 	d.Body(func() {
-		f.Paragraph(alert.message, 0).FontSize(13)
+		f.Paragraph(alert.message, 6).FontSize(13)
 	})
 	d.Footer(func() {
+		if alert.kind == alertUpdate {
+			if f.Button(dialogUpdateID, "下载并更新").Clicked() {
+				if alert.update != nil {
+					m.downloadAndUpdate(alert.update)
+				}
+				m.clearAlert()
+			}
+			if f.Button(dialogOKID, "稍后").Outline().Clicked() {
+				m.clearAlert()
+			}
+			return
+		}
 		if alert.kind == alertFree {
 			if f.Button(dialogPaidID, "已缴费").Outline().Clicked() {
 				m.markPaid()
@@ -661,6 +691,7 @@ func main() {
 	var invalidator app.Invalidator
 	m.invalidator = &invalidator
 	m.log("就绪：点击右上角“配置”填写车牌与 Token，然后点“开始监控”")
+	m.startUpdateChecker()
 
 	config := app.Config{
 		Title:       "停车免费时长监控",
