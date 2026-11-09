@@ -428,7 +428,7 @@ func (m *model) paint(canvas *ui.Canvas, size ui.Size) {
 	m.view.Draw(canvas, theme, bounds, func(f *flex.Frame) {
 		f.Column().Fill().Pad(20).Gap(12).Children(func() {
 			f.Row().FillWidth().Items(flex.Center).Gap(8).Children(func() {
-				f.Text("停车免费时长监控").Bold().FontSize(20)
+				f.Text("停车时长监控").Bold().FontSize(20)
 				f.Text("v" + appVersion).Muted().FontSize(12).Self(flex.Center)
 				f.Spacer()
 				if f.Button(startBtnID, "开始监控").Disabled(running).Clicked() {
@@ -727,7 +727,7 @@ func (m *model) paintCloseDialog(f *flex.Frame, theme ui.Theme) {
 		return
 	}
 	d := f.Dialog(flex.DialogSpec{
-		Title:     "关闭停车免费时长监控？",
+		Title:     "关闭停车时长监控？",
 		Width:     440,
 		Scope:     closeSurface,
 		DismissID: closeDismiss,
@@ -840,7 +840,7 @@ func main() {
 	m.startUpdateChecker()
 
 	config := app.Config{
-		Title:          "停车免费时长监控",
+		Title:          "停车时长监控",
 		Width:          760,
 		Height:         900,
 		MinWidth:       640,
@@ -862,7 +862,7 @@ func main() {
 		m.window = window
 		m.application = application
 		if item, err := application.AddStatusItem(app.StatusItemConfig{
-			Tooltip: "停车免费时长监控 v" + appVersion,
+			Tooltip: "停车时长监控 v" + appVersion,
 			Icon:    trayIcon(),
 			OnClick: func(app.StatusClick) { m.showWindow() },
 			Menu: func() []app.MenuItem {
