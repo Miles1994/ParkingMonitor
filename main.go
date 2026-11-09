@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vivaui/viva/app"
+	"github.com/vivaui/viva/components"
 	"github.com/vivaui/viva/flex"
 	"github.com/vivaui/viva/ui"
 )
@@ -22,7 +23,6 @@ var (
 	intervalFieldID = tree.ID(page, "interval")
 	freeFieldID     = tree.ID(page, "free")
 	advanceFieldID  = tree.ID(page, "advance")
-	pasteBtnID      = tree.ID(page, "paste")
 	saveBtnID       = tree.ID(page, "save")
 	startBtnID      = tree.ID(page, "start")
 	stopBtnID       = tree.ID(page, "stop")
@@ -67,7 +67,6 @@ type model struct {
 	cfg Config
 
 	carnoField    flex.Field
-	tokenField    flex.Field
 	intervalField flex.Field
 	freeField     flex.Field
 	advanceField  flex.Field
@@ -82,6 +81,7 @@ type model struct {
 	logs    []string
 	alert   *alertState
 
+	tokenValue   string
 	pendingToken string
 
 	view        flex.View
@@ -93,8 +93,7 @@ type model struct {
 func newModel(cfg Config) *model {
 	m := &model{cfg: cfg}
 	m.carnoField.SetText(cfg.Carno)
-	m.tokenField.SetText(cfg.Token)
-	m.tokenField.Secure = true
+	m.tokenValue = cfg.Token
 	m.intervalField.SetText(strconv.Itoa(cfg.IntervalMinutes))
 	m.freeField.SetText(strconv.Itoa(cfg.FreeMinutes))
 
@@ -182,7 +181,7 @@ func (m *model) onFreeAlert(a AlertInfo) {
 
 func (m *model) collectConfig() (Config, error) {
 	carno := strings.TrimSpace(m.carnoField.Text())
-	token := strings.TrimSpace(m.tokenField.Text())
+	token := strings.TrimSpace(m.tokenValue)
 	if carno == "" {
 		return Config{}, errors.New("请填写车牌号")
 	}
@@ -370,7 +369,7 @@ func (m *model) paint(canvas *ui.Canvas, size ui.Size) {
 	m.mu.Unlock()
 
 	if pendingToken != "" {
-		m.tokenField.SetText(pendingToken)
+		m.tokenValue = pendingToken
 	}
 
 	m.view.Draw(canvas, theme, bounds, func(f *flex.Frame) {
@@ -394,12 +393,16 @@ func (m *model) paintForm(f *flex.Frame, theme ui.Theme, running bool) {
 		f.Column().Gap(4).Children(func() {
 			f.Text("Token").FontSize(12).Muted()
 			f.Row().Gap(8).Items(flex.Center).Children(func() {
-				f.Field(&m.tokenField, tokenFieldID, "Token", "小程序登录 Token").Grow(1)
-				if f.Button(pasteBtnID, "剪贴板填入").Outline().Clicked() {
-					if clip, err := app.ClipboardText(); err == nil && strings.TrimSpace(clip) != "" {
-						m.tokenField.SetText(strings.TrimSpace(clip))
-						m.log("已从剪贴板填入 Token，请核对")
-					}
+				f.Input(components.InputSnapshot{
+					ID:          tokenFieldID,
+					Label:       "Token",
+					Value:       m.tokenValue,
+					Placeholder: "点击右侧按钮自动获取",
+					ReadOnly:    true,
+					Secure:      true,
+				}).Grow(1)
+				if f.Button(autoBtnID, "点击获取").Outline().Clicked() {
+					m.captureToken()
 				}
 			})
 		})
@@ -449,9 +452,6 @@ func (m *model) paintForm(f *flex.Frame, theme ui.Theme, running bool) {
 			}
 			if f.Button(stopBtnID, "停止监控").Outline().Disabled(!running).Clicked() {
 				m.stopMonitor()
-			}
-			if f.Button(autoBtnID, "自动获取 Token").Outline().Clicked() {
-				m.captureToken()
 			}
 		})
 	})
@@ -563,7 +563,7 @@ func main() {
 		MinWidth:    640,
 		MinHeight:   720,
 		Invalidator: &invalidator,
-		TextInput:   flex.Fields(&m.carnoField, &m.tokenField, &m.intervalField, &m.freeField, &m.advanceField),
+		TextInput:   flex.Fields(&m.carnoField, &m.intervalField, &m.freeField, &m.advanceField),
 		OnClosed:    m.shutdown,
 	}
 	config.Paint = m.paint
