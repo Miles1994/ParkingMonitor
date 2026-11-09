@@ -391,10 +391,15 @@ func (m *model) paint(canvas *ui.Canvas, size ui.Size) {
 
 	m.view.Draw(canvas, theme, bounds, func(f *flex.Frame) {
 		f.Column().Fill().Pad(20).Gap(12).Children(func() {
-			f.Row().FillWidth().Items(flex.Center).Gap(12).Children(func() {
+			f.Row().FillWidth().Items(flex.Center).Gap(8).Children(func() {
 				f.Text("停车免费时长监控").Bold().FontSize(20)
 				f.Spacer()
-				f.Text(m.configSummary()).Muted().FontSize(12)
+				if f.Button(startBtnID, "开始监控").Disabled(running).Clicked() {
+					m.startMonitor()
+				}
+				if f.Button(stopBtnID, "停止监控").Outline().Disabled(!running).Clicked() {
+					m.stopMonitor()
+				}
 				if f.Button(configBtnID, "配置").Outline().Clicked() {
 					m.configOpen = true
 					m.requestPaint()
@@ -403,7 +408,7 @@ func (m *model) paint(canvas *ui.Canvas, size ui.Size) {
 			m.paintStatus(f, theme, st)
 			m.paintLog(f, theme, logs)
 		})
-		m.paintConfigDialog(f, theme, running)
+		m.paintConfigDialog(f, theme)
 		m.paintDialog(f, alert)
 	})
 }
@@ -419,7 +424,7 @@ func (m *model) configSummary() string {
 	return fmt.Sprintf("%s · %s · 每 %s 分钟 · 免费 %s 分钟", region, carno, interval, free)
 }
 
-func (m *model) paintConfigDialog(f *flex.Frame, theme ui.Theme, running bool) {
+func (m *model) paintConfigDialog(f *flex.Frame, theme ui.Theme) {
 	if !m.configOpen {
 		return
 	}
@@ -435,18 +440,10 @@ func (m *model) paintConfigDialog(f *flex.Frame, theme ui.Theme, running bool) {
 		m.paintForm(f, theme)
 	})
 	d.Footer(func() {
-		if f.Button(saveBtnID, "保存配置").Outline().Clicked() {
+		if f.Button(saveBtnID, "保存配置").Clicked() {
 			m.saveConfigFromForm()
 		}
-		if f.Button(startBtnID, "开始监控").Disabled(running).Clicked() {
-			if m.startMonitor() {
-				m.configOpen = false
-			}
-		}
-		if f.Button(stopBtnID, "停止监控").Outline().Disabled(!running).Clicked() {
-			m.stopMonitor()
-		}
-		if f.Button(configCloseID, "关闭").Clicked() {
+		if f.Button(configCloseID, "关闭").Outline().Clicked() {
 			m.configOpen = false
 		}
 	})
@@ -538,7 +535,11 @@ func (m *model) paintStatus(f *flex.Frame, theme ui.Theme, st MonitorStatus) {
 		if st.Running {
 			phase += " · 监控中"
 		}
-		f.Text("状态：" + phase).Bold().FontSize(14)
+		f.Row().FillWidth().Items(flex.Center).Gap(12).Children(func() {
+			f.Text("状态：" + phase).Bold().FontSize(14)
+			f.Spacer()
+			f.Text(m.configSummary()).Muted().FontSize(12)
+		})
 
 		if st.InPark {
 			f.Text("距离 " + strconv.Itoa(m.currentFreeMinutes()) + " 分钟免费时长结束").Muted().Self(flex.Center)
