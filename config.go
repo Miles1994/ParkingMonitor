@@ -47,8 +47,8 @@ func loadConfig() Config {
 }
 
 func normalizeConfig(cfg *Config) {
-	if cfg.Region != "gaoxin" && cfg.Region != "lianhu" {
-		cfg.Region = "gaoxin"
+	if !validRegion(cfg.Region) {
+		cfg.Region = regionList[0].Key
 	}
 	if cfg.IntervalMinutes < 5 || cfg.IntervalMinutes > 1440 {
 		cfg.IntervalMinutes = 10

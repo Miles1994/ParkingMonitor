@@ -42,6 +42,27 @@ var regionList = []Region{
 		MiniAppID:   "wx486ce667a7d7b907",
 		MiniVersion: "67",
 	},
+	{
+		Key:         "bilin",
+		Name:        "碑林区",
+		MiniName:    "碑林智慧停车",
+		Host:        "https://www.xablzhtc.com/",
+		Hostname:    "www.xablzhtc.com",
+		AppID:       "wx9aeee98af3ad4ba3",
+		Version:     "1.5.10",
+		Mchid:       "167",
+		MiniAppID:   "wx9aeee98af3ad4ba3",
+		MiniVersion: "102",
+	},
+}
+
+func validRegion(key string) bool {
+	for _, r := range regionList {
+		if r.Key == key {
+			return true
+		}
+	}
+	return false
 }
 
 func regionByKey(key string) Region {
