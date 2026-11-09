@@ -50,6 +50,14 @@ var (
 	configSurface = tree.ID(configScope, "surface")
 	configDismiss = tree.ID(configScope, "dismiss")
 
+	closeScope     = tree.Sub(page, tree.Name("close-dialog"))
+	closeSurface   = tree.ID(closeScope, "surface")
+	closeDismiss   = tree.ID(closeScope, "dismiss")
+	closeCancelID  = tree.ID(closeScope, "cancel")
+	closeExitID    = tree.ID(closeScope, "exit")
+	closeTrayID    = tree.ID(closeScope, "tray")
+	closeDontAskID = tree.ID(closeScope, "dont-ask")
+
 	intervalPresets = []string{"5", "10", "15", "30"}
 	freePresets     = []string{"10", "15", "20", "30", "60"}
 	unitLabels      = []string{"分钟", "秒"}
@@ -98,6 +106,13 @@ type model struct {
 	pendingUpdate  *updateInfo
 	updatePrompted bool
 	updating       bool
+
+	closeConfirm bool
+	closeDontAsk bool
+	closeAllow   func()
+	window       *app.Window
+	application  *app.Application
+	tray         *app.StatusItem
 
 	tokenValue   string
 	pendingToken string
@@ -225,6 +240,9 @@ func (m *model) collectConfig() (Config, error) {
 	if advance > free*60 {
 		return Config{}, errors.New("提前提醒时间不能大于免费时长")
 	}
+	m.mu.Lock()
+	closeAction := m.cfg.CloseAction
+	m.mu.Unlock()
 	return Config{
 		Region:          regionList[m.region].Key,
 		Token:           token,
@@ -232,6 +250,7 @@ func (m *model) collectConfig() (Config, error) {
 		IntervalMinutes: interval,
 		FreeMinutes:     free,
 		AdvanceSeconds:  advance,
+		CloseAction:     closeAction,
 	}, nil
 }
 
@@ -428,6 +447,7 @@ func (m *model) paint(canvas *ui.Canvas, size ui.Size) {
 		})
 		m.paintConfigDialog(f, theme)
 		m.paintDialog(f, alert)
+		m.paintCloseDialog(f, theme)
 	})
 }
 
@@ -683,6 +703,132 @@ func (m *model) paintDialog(f *flex.Frame, alert *alertState) {
 	}
 }
 
+func (m *model) requestClose(allow func()) {
+	m.mu.Lock()
+	action := m.cfg.CloseAction
+	m.closeAllow = allow
+	if action != "" {
+		m.mu.Unlock()
+		if action == "tray" {
+			m.minimizeToTray()
+		} else {
+			m.exitApp()
+		}
+		return
+	}
+	m.closeDontAsk = false
+	m.closeConfirm = true
+	m.mu.Unlock()
+	m.requestPaint()
+}
+
+func (m *model) paintCloseDialog(f *flex.Frame, theme ui.Theme) {
+	if !m.closeConfirm {
+		return
+	}
+	d := f.Dialog(flex.DialogSpec{
+		Title:     "关闭停车免费时长监控？",
+		Width:     440,
+		Scope:     closeSurface,
+		DismissID: closeDismiss,
+		CloseID:   closeDismiss,
+	})
+	d.Body(func() {
+		f.Column().Gap(12).Children(func() {
+			f.Paragraph("最小化到托盘后，监控和后台任务会继续运行；退出应用会停止正在进行的监控。", 3).FontSize(13)
+			f.Row().Gap(8).Items(flex.Center).Children(func() {
+				if f.Checkbox(closeDontAskID, m.closeDontAsk).Clicked() {
+					m.closeDontAsk = !m.closeDontAsk
+					m.requestPaint()
+				}
+				f.Text("不再询问").FontSize(13)
+			})
+		})
+	})
+	d.Footer(func() {
+		if f.Button(closeCancelID, "取消").Outline().Clicked() {
+			m.cancelClose()
+		}
+		if f.Button(closeExitID, "退出应用").Destructive().Clicked() {
+			m.rememberCloseAction("exit")
+			m.exitApp()
+		}
+		if f.Button(closeTrayID, "最小化到托盘").Clicked() {
+			m.rememberCloseAction("tray")
+			m.minimizeToTray()
+		}
+	})
+	if d.Dismissed() {
+		m.cancelClose()
+	}
+}
+
+func (m *model) cancelClose() {
+	m.mu.Lock()
+	m.closeConfirm = false
+	m.closeDontAsk = false
+	m.closeAllow = nil
+	m.mu.Unlock()
+	m.requestPaint()
+}
+
+func (m *model) rememberCloseAction(action string) {
+	if !m.closeDontAsk {
+		return
+	}
+	m.mu.Lock()
+	m.cfg.CloseAction = action
+	m.closeDontAsk = false
+	cfg := m.cfg
+	m.mu.Unlock()
+	if err := saveConfig(cfg); err != nil {
+		m.log("保存关闭行为失败：" + err.Error())
+	}
+}
+
+func (m *model) minimizeToTray() {
+	m.mu.Lock()
+	m.closeConfirm = false
+	m.closeAllow = nil
+	m.mu.Unlock()
+	if m.window != nil {
+		m.window.Hide()
+	}
+}
+
+func (m *model) showWindow() {
+	if m.window != nil {
+		m.window.Show()
+	}
+}
+
+func (m *model) exitApp() {
+	m.mu.Lock()
+	allow := m.closeAllow
+	m.closeAllow = nil
+	m.closeConfirm = false
+	m.mu.Unlock()
+	m.shutdown()
+	if m.tray != nil {
+		m.tray.Remove()
+	}
+	if allow != nil {
+		allow()
+	} else if m.application != nil {
+		m.application.Quit()
+	}
+}
+
+func (m *model) quitFromTray() {
+	m.shutdown()
+	if m.tray != nil {
+		m.tray.Remove()
+	}
+	if m.application != nil {
+		m.application.Quit()
+	}
+}
+
 func main() {
 	cfg := loadConfig()
 	m := newModel(cfg)
@@ -694,20 +840,43 @@ func main() {
 	m.startUpdateChecker()
 
 	config := app.Config{
-		Title:       "停车免费时长监控",
-		Width:       760,
-		Height:      900,
-		MinWidth:    640,
-		MinHeight:   720,
-		Invalidator: &invalidator,
-		TextInput:   flex.Fields(&m.carnoField, &m.intervalField, &m.freeField, &m.advanceField),
-		OnScroll:    m.view.Wheel,
-		OnClosed:    m.shutdown,
+		Title:          "停车免费时长监控",
+		Width:          760,
+		Height:         900,
+		MinWidth:       640,
+		MinHeight:      720,
+		Invalidator:    &invalidator,
+		TextInput:      flex.Fields(&m.carnoField, &m.intervalField, &m.freeField, &m.advanceField),
+		OnScroll:       m.view.Wheel,
+		OnCloseRequest: m.requestClose,
+		OnClosed:       m.shutdown,
 	}
 	config.Paint = m.paint
 
-	var canvas ui.Canvas
-	if err := app.RunCanvas(config, &canvas); err != nil {
+	if err := app.RunApplication(func(application *app.Application) error {
+		var canvas ui.Canvas
+		window, err := application.OpenWindow(config, &canvas)
+		if err != nil {
+			return err
+		}
+		m.window = window
+		m.application = application
+		if item, err := application.AddStatusItem(app.StatusItemConfig{
+			Tooltip: "停车免费时长监控 v" + appVersion,
+			Icon:    trayIcon(),
+			OnClick: func(app.StatusClick) { m.showWindow() },
+			Menu: func() []app.MenuItem {
+				return []app.MenuItem{
+					{Title: "打开主界面", OnSelect: m.showWindow},
+					{Separator: true},
+					{Title: "退出", OnSelect: m.quitFromTray},
+				}
+			},
+		}); err == nil {
+			m.tray = item
+		}
+		return nil
+	}); err != nil {
 		panic(err)
 	}
 }

@@ -13,6 +13,7 @@ type Config struct {
 	IntervalMinutes int    `json:"interval_minutes"`
 	FreeMinutes     int    `json:"free_minutes"`
 	AdvanceSeconds  int    `json:"advance_seconds"`
+	CloseAction     string `json:"close_action"`
 }
 
 func defaultConfig() Config {
@@ -61,6 +62,9 @@ func normalizeConfig(cfg *Config) {
 	}
 	if limit := cfg.FreeMinutes * 60; cfg.AdvanceSeconds > limit {
 		cfg.AdvanceSeconds = limit
+	}
+	if cfg.CloseAction != "tray" && cfg.CloseAction != "exit" {
+		cfg.CloseAction = ""
 	}
 }
 
