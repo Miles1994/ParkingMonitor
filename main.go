@@ -30,6 +30,9 @@ var (
 	advMinusID      = tree.ID(page, "adv-minus")
 	advPlusID       = tree.ID(page, "adv-plus")
 	logAreaID       = tree.ID(page, "log")
+	logScrollID     = tree.ID(page, "log-scroll")
+	configBtnID     = tree.ID(page, "config")
+	configCloseID   = tree.ID(page, "config-close")
 
 	intervalScope = tree.Sub(page, tree.Name("interval-select"))
 	freeScope     = tree.Sub(page, tree.Name("free-select"))
@@ -41,6 +44,10 @@ var (
 	dialogDismiss = tree.ID(dialogScope, "dismiss")
 	dialogOKID    = tree.ID(dialogScope, "ok")
 	dialogPaidID  = tree.ID(dialogScope, "paid")
+
+	configScope   = tree.Sub(page, tree.Name("config-dialog"))
+	configSurface = tree.ID(configScope, "surface")
+	configDismiss = tree.ID(configScope, "dismiss")
 
 	intervalPresets = []string{"5", "10", "15", "30"}
 	freePresets     = []string{"10", "15", "20", "30", "60"}
@@ -79,10 +86,12 @@ type model struct {
 	unit        int
 	region      int
 
-	running bool
-	status  MonitorStatus
-	logs    []string
-	alert   *alertState
+	running    bool
+	status     MonitorStatus
+	logs       []string
+	alert      *alertState
+	configOpen bool
+	logScroll  flex.SliderState
 
 	tokenValue   string
 	pendingToken string
@@ -249,22 +258,22 @@ func (m *model) saveConfigFromForm() {
 	m.log("配置已保存")
 }
 
-func (m *model) startMonitor() {
+func (m *model) startMonitor() bool {
 	m.mu.Lock()
 	if m.running {
 		m.mu.Unlock()
-		return
+		return false
 	}
 	m.mu.Unlock()
 
 	cfg, err := m.collectConfig()
 	if err != nil {
 		m.showError(err)
-		return
+		return false
 	}
 	if err := saveConfig(cfg); err != nil {
 		m.showError(err)
-		return
+		return false
 	}
 
 	mon := NewMonitor(cfg, m.setStatus, m.onFreeAlert, m.onEntryAlert, m.log)
@@ -272,7 +281,7 @@ func (m *model) startMonitor() {
 	m.mu.Lock()
 	if m.running {
 		m.mu.Unlock()
-		return
+		return false
 	}
 	m.cfg = cfg
 	old := m.monitor
@@ -286,6 +295,7 @@ func (m *model) startMonitor() {
 	mon.Start()
 	keepAwake(true)
 	m.requestPaint()
+	return true
 }
 
 func (m *model) stopMonitor() {
@@ -381,17 +391,72 @@ func (m *model) paint(canvas *ui.Canvas, size ui.Size) {
 
 	m.view.Draw(canvas, theme, bounds, func(f *flex.Frame) {
 		f.Column().Fill().Pad(20).Gap(12).Children(func() {
-			f.Text("停车免费时长监控").Bold().FontSize(20)
-			m.paintForm(f, theme, running)
+			f.Row().FillWidth().Items(flex.Center).Gap(12).Children(func() {
+				f.Text("停车免费时长监控").Bold().FontSize(20)
+				f.Spacer()
+				f.Text(m.configSummary()).Muted().FontSize(12)
+				if f.Button(configBtnID, "配置").Outline().Clicked() {
+					m.configOpen = true
+					m.requestPaint()
+				}
+			})
 			m.paintStatus(f, theme, st)
 			m.paintLog(f, theme, logs)
 		})
+		m.paintConfigDialog(f, theme, running)
 		m.paintDialog(f, alert)
 	})
 }
 
-func (m *model) paintForm(f *flex.Frame, theme ui.Theme, running bool) {
-	f.Column().FillWidth().Background(theme.Card).Border(1, theme.Border).Radius(12).Pad(16).Gap(10).Children(func() {
+func (m *model) configSummary() string {
+	region := regionList[m.region].Name
+	carno := strings.TrimSpace(m.carnoField.Text())
+	if carno == "" {
+		carno = "未填写车牌"
+	}
+	interval := strings.TrimSpace(m.intervalField.Text())
+	free := strings.TrimSpace(m.freeField.Text())
+	return fmt.Sprintf("%s · %s · 每 %s 分钟 · 免费 %s 分钟", region, carno, interval, free)
+}
+
+func (m *model) paintConfigDialog(f *flex.Frame, theme ui.Theme, running bool) {
+	if !m.configOpen {
+		return
+	}
+	d := f.Dialog(flex.DialogSpec{
+		Title:     "监控配置",
+		Width:     520,
+		Height:    560,
+		Scope:     configSurface,
+		DismissID: configDismiss,
+		CloseID:   configDismiss,
+	})
+	d.Body(func() {
+		m.paintForm(f, theme)
+	})
+	d.Footer(func() {
+		if f.Button(saveBtnID, "保存配置").Outline().Clicked() {
+			m.saveConfigFromForm()
+		}
+		if f.Button(startBtnID, "开始监控").Disabled(running).Clicked() {
+			if m.startMonitor() {
+				m.configOpen = false
+			}
+		}
+		if f.Button(stopBtnID, "停止监控").Outline().Disabled(!running).Clicked() {
+			m.stopMonitor()
+		}
+		if f.Button(configCloseID, "关闭").Clicked() {
+			m.configOpen = false
+		}
+	})
+	if d.Dismissed() {
+		m.configOpen = false
+	}
+}
+
+func (m *model) paintForm(f *flex.Frame, theme ui.Theme) {
+	f.Column().FillWidth().Gap(10).Children(func() {
 		f.Column().Gap(4).Children(func() {
 			f.Text("地区").FontSize(12).Muted()
 			if i, ok := f.Select(regionScope, &m.regionSel, regionNames, m.region).Picked(); ok {
@@ -464,17 +529,6 @@ func (m *model) paintForm(f *flex.Frame, theme ui.Theme, running bool) {
 			})
 		})
 
-		f.Row().Gap(8).Children(func() {
-			if f.Button(saveBtnID, "保存配置").Outline().Clicked() {
-				m.saveConfigFromForm()
-			}
-			if f.Button(startBtnID, "开始监控").Disabled(running).Clicked() {
-				m.startMonitor()
-			}
-			if f.Button(stopBtnID, "停止监控").Outline().Disabled(!running).Clicked() {
-				m.stopMonitor()
-			}
-		})
 	})
 }
 
@@ -528,14 +582,41 @@ func (m *model) currentFreeMinutes() int {
 }
 
 func (m *model) paintLog(f *flex.Frame, theme ui.Theme, logs []string) {
-	f.Column().FillWidth().Grow(1).Background(theme.Card).Border(1, theme.Border).Radius(12).Pad(16).Gap(8).Children(func() {
+	f.Column().FillWidth().Grow(1).Shrink(1).Background(theme.Card).Border(1, theme.Border).Radius(12).Pad(16).Gap(8).Children(func() {
 		f.Text("运行日志").Bold().FontSize(14)
-		f.ScrollArea(logAreaID).Grow(1).Follow(true).Gap(4).Children(func() {
-			for _, line := range logs {
-				f.Text(line).FontSize(12).Color(theme.Foreground)
-			}
+		f.Row().FillWidth().Grow(1).Shrink(1).Gap(8).Children(func() {
+			f.ScrollArea(logAreaID).Grow(1).Shrink(1).FillHeight().Follow(true).Gap(4).Children(func() {
+				for _, line := range logs {
+					f.Text(line).FontSize(12).Color(theme.Foreground)
+				}
+			})
+			m.paintLogScrollbar(f, theme)
 		})
 	})
+}
+
+func (m *model) paintLogScrollbar(f *flex.Frame, theme ui.Theme) {
+	state := m.view.ScrollState(logAreaID)
+	limit := state.Max()
+	if limit <= 0 {
+		return
+	}
+	m.logScroll.Value = limit - state.Offset
+	bar := f.SliderBase(logScrollID, &m.logScroll).Vertical().Width(16).Shrink(1).FillHeight().Range(0, limit).Step(1)
+	bar.Draw(func(d *flex.DrawContext) {
+		track := ui.Rect{X: d.Rect.X + d.Rect.Width/2 - 2, Y: d.Rect.Y, Width: 4, Height: d.Rect.Height}
+		d.Canvas.Rounded(track, 2, theme.Border)
+		thumbHeight := d.Rect.Height
+		if state.Content > state.Viewport && state.Content > 0 {
+			thumbHeight *= state.Viewport / state.Content
+		}
+		thumbHeight = min(max(thumbHeight, 24), d.Rect.Height)
+		y := d.Rect.Y + (1-m.logScroll.Fraction())*(d.Rect.Height-thumbHeight)
+		d.Canvas.Rounded(ui.Rect{X: d.Rect.X + d.Rect.Width/2 - 4, Y: y, Width: 8, Height: thumbHeight}, 4, theme.MutedForeground)
+	})
+	if bar.Changed() {
+		state.ScrollTo(limit - m.logScroll.Value)
+	}
 }
 
 func (m *model) paintDialog(f *flex.Frame, alert *alertState) {
@@ -575,7 +656,7 @@ func main() {
 
 	var invalidator app.Invalidator
 	m.invalidator = &invalidator
-	m.log("就绪：填写车牌与 Token，保存配置后点“开始监控”")
+	m.log("就绪：点击右上角“配置”填写车牌与 Token，然后点“开始监控”")
 
 	config := app.Config{
 		Title:       "停车免费时长监控",
@@ -585,6 +666,7 @@ func main() {
 		MinHeight:   720,
 		Invalidator: &invalidator,
 		TextInput:   flex.Fields(&m.carnoField, &m.intervalField, &m.freeField, &m.advanceField),
+		OnScroll:    m.view.Wheel,
 		OnClosed:    m.shutdown,
 	}
 	config.Paint = m.paint
