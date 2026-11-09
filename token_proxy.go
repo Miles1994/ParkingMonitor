@@ -125,6 +125,12 @@ func (p *TokenProxy) Start(onToken func(string), onLog func(string), onStop func
 	return nil
 }
 
+func (p *TokenProxy) IsRunning() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.running
+}
+
 func (p *TokenProxy) Stop() {
 	p.mu.Lock()
 	srv := p.server

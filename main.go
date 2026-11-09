@@ -82,6 +82,8 @@ type model struct {
 	logs    []string
 	alert   *alertState
 
+	pendingToken string
+
 	view        flex.View
 	invalidator *app.Invalidator
 	monitor     *Monitor
@@ -244,6 +246,13 @@ func (m *model) saveConfigFromForm() {
 }
 
 func (m *model) startMonitor() {
+	m.mu.Lock()
+	if m.running {
+		m.mu.Unlock()
+		return
+	}
+	m.mu.Unlock()
+
 	cfg, err := m.collectConfig()
 	if err != nil {
 		m.showError(err)
@@ -254,16 +263,22 @@ func (m *model) startMonitor() {
 		return
 	}
 
-	m.mu.Lock()
-	m.cfg = cfg
-	if m.monitor != nil {
-		m.monitor.Stop()
-	}
 	mon := NewMonitor(cfg, m.setStatus, m.onFreeAlert, m.onEntryAlert, m.log)
+
+	m.mu.Lock()
+	if m.running {
+		m.mu.Unlock()
+		return
+	}
+	m.cfg = cfg
+	old := m.monitor
 	m.monitor = mon
 	m.running = true
 	m.mu.Unlock()
 
+	if old != nil {
+		old.Stop()
+	}
 	mon.Start()
 	keepAwake(true)
 	m.requestPaint()
@@ -291,19 +306,17 @@ func (m *model) markPaid() {
 }
 
 func (m *model) captureToken() {
-	m.mu.Lock()
-	if m.tokenProxy.running {
-		m.mu.Unlock()
+	if m.tokenProxy.IsRunning() {
+		m.showInfo("提示", "代理已在运行，请先在微信中完成一次查询。")
 		return
 	}
-	m.mu.Unlock()
 
 	m.log("正在准备本地代理...")
 	go func() {
 		err := m.tokenProxy.Start(
 			func(token string) {
-				m.tokenField.SetText(token)
 				m.mu.Lock()
+				m.pendingToken = token
 				m.cfg.Token = token
 				cfg := m.cfg
 				m.mu.Unlock()
@@ -352,7 +365,13 @@ func (m *model) paint(canvas *ui.Canvas, size ui.Size) {
 	running := m.running
 	logs := append([]string(nil), m.logs...)
 	alert := m.alert
+	pendingToken := m.pendingToken
+	m.pendingToken = ""
 	m.mu.Unlock()
+
+	if pendingToken != "" {
+		m.tokenField.SetText(pendingToken)
+	}
 
 	m.view.Draw(canvas, theme, bounds, func(f *flex.Frame) {
 		f.Column().Fill().Pad(20).Gap(12).Children(func() {
@@ -425,7 +444,7 @@ func (m *model) paintForm(f *flex.Frame, theme ui.Theme, running bool) {
 			if f.Button(saveBtnID, "保存配置").Outline().Clicked() {
 				m.saveConfigFromForm()
 			}
-			if f.Button(startBtnID, "开始监控").Clicked() {
+			if f.Button(startBtnID, "开始监控").Disabled(running).Clicked() {
 				m.startMonitor()
 			}
 			if f.Button(stopBtnID, "停止监控").Outline().Disabled(!running).Clicked() {
