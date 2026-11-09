@@ -564,7 +564,10 @@ func (m *model) paintStatus(f *flex.Frame, theme ui.Theme, st MonitorStatus) {
 			}
 		} else {
 			f.Text("--:--").FontSize(46).Bold().Muted().Self(flex.Center)
-			f.Text("入场时间：-").Muted()
+			f.Row().Gap(24).Children(func() {
+				f.Text("入场时间：-").Muted()
+				f.Text("已停时长：-").Muted()
+			})
 			if !st.LastQuery.IsZero() {
 				f.Text("上次查询：" + st.LastQuery.Format("15:04:05")).Muted()
 			}
