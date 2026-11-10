@@ -90,6 +90,8 @@ type toastState struct {
 	message string
 	undo    func()
 	id      int
+	expires time.Time
+	total   time.Duration
 }
 
 type model struct {
@@ -728,21 +730,39 @@ func (m *model) restoreHistory(carno string, idx int) {
 }
 
 func (m *model) showToast(message string, undo func()) {
+	const lifetime = 10 * time.Second
 	m.mu.Lock()
 	m.toastID++
 	id := m.toastID
-	m.toast = &toastState{message: message, undo: undo, id: id}
+	m.toast = &toastState{
+		message: message,
+		undo:    undo,
+		id:      id,
+		expires: time.Now().Add(lifetime),
+		total:   lifetime,
+	}
 	m.mu.Unlock()
 	m.requestPaint()
 
 	go func() {
-		time.Sleep(10 * time.Second)
-		m.mu.Lock()
-		if m.toast != nil && m.toast.id == id {
-			m.toast = nil
+		ticker := time.NewTicker(200 * time.Millisecond)
+		defer ticker.Stop()
+		for range ticker.C {
+			m.mu.Lock()
+			t := m.toast
+			expired := t != nil && t.id == id && !time.Now().Before(t.expires)
+			if expired {
+				m.toast = nil
+			}
+			m.mu.Unlock()
+			if t == nil || t.id != id {
+				return
+			}
+			m.requestPaint()
+			if expired {
+				return
+			}
 		}
-		m.mu.Unlock()
-		m.requestPaint()
 	}()
 }
 
@@ -768,7 +788,14 @@ func (m *model) paintToast(f *flex.Frame, bounds ui.Rect, theme ui.Theme, toast 
 	if toast == nil {
 		return
 	}
-	const width, height = float32(360), float32(88)
+	const width, height = float32(360), float32(96)
+	fraction := float32(0)
+	if toast.total > 0 {
+		remaining := time.Until(toast.expires)
+		if remaining > 0 {
+			fraction = float32(remaining) / float32(toast.total)
+		}
+	}
 	f.Popup().At(bounds.Width-width-20, bounds.Height-height-20).Width(width).Children(func() {
 		f.Column().FillWidth().Height(height).Background(theme.CardElevated).Border(1, theme.Border).Radius(12).Pad(12).Gap(8).Children(func() {
 			f.Text(toast.message).FontSize(13)
@@ -779,6 +806,13 @@ func (m *model) paintToast(f *flex.Frame, bounds ui.Rect, theme ui.Theme, toast 
 				if f.Button(toastUndoID, "撤销").Outline().Clicked() {
 					m.undoToast()
 				}
+			})
+			f.Slot().FillWidth().Height(3).Background(theme.Muted).Radius(2).DrawOver(func(d *flex.DrawContext) {
+				progress := d.Rect.Width * fraction
+				if progress <= 0 {
+					return
+				}
+				d.Canvas.Rounded(ui.Rect{X: d.Rect.X, Y: d.Rect.Y, Width: progress, Height: d.Rect.Height}, 2, theme.Primary)
 			})
 		})
 	})
