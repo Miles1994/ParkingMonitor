@@ -1082,6 +1082,10 @@ func (m *model) quitFromTray() {
 }
 
 func main() {
+	if !ensureSingleInstance() {
+		return
+	}
+
 	cfg := loadConfig()
 	m := newModel(cfg)
 	m.tokenProxy = &TokenProxy{}
