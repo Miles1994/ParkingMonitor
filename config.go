@@ -4,16 +4,18 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type Config struct {
-	Region          string `json:"region"`
-	Token           string `json:"token"`
-	Carno           string `json:"carno"`
-	IntervalMinutes int    `json:"interval_minutes"`
-	FreeMinutes     int    `json:"free_minutes"`
-	AdvanceSeconds  int    `json:"advance_seconds"`
-	CloseAction     string `json:"close_action"`
+	Region          string   `json:"region"`
+	Token           string   `json:"token"`
+	Carno           string   `json:"carno"`
+	IntervalMinutes int      `json:"interval_minutes"`
+	FreeMinutes     int      `json:"free_minutes"`
+	AdvanceSeconds  int      `json:"advance_seconds"`
+	CloseAction     string   `json:"close_action"`
+	HistoryCarnos   []string `json:"history_carnos"`
 }
 
 func defaultConfig() Config {
@@ -66,6 +68,20 @@ func normalizeConfig(cfg *Config) {
 	if cfg.CloseAction != "tray" && cfg.CloseAction != "exit" {
 		cfg.CloseAction = ""
 	}
+	seen := make(map[string]bool, len(cfg.HistoryCarnos))
+	history := make([]string, 0, len(cfg.HistoryCarnos))
+	for _, carno := range cfg.HistoryCarnos {
+		carno = strings.TrimSpace(carno)
+		if carno == "" || seen[carno] {
+			continue
+		}
+		seen[carno] = true
+		history = append(history, carno)
+		if len(history) >= 20 {
+			break
+		}
+	}
+	cfg.HistoryCarnos = history
 }
 
 func saveConfig(cfg Config) error {

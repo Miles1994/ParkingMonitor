@@ -58,6 +58,12 @@ var (
 	closeTrayID    = tree.ID(closeScope, "tray")
 	closeDontAskID = tree.ID(closeScope, "dont-ask")
 
+	historyScope       = tree.Sub(page, tree.Name("history"))
+	historyDeleteScope = tree.Sub(page, tree.Name("history-delete"))
+	historyToggleID    = tree.ID(page, "history-toggle")
+	toastUndoID        = tree.ID(page, "toast-undo")
+	toastCloseID       = tree.ID(page, "toast-close")
+
 	intervalPresets = []string{"5", "10", "15", "30"}
 	freePresets     = []string{"10", "15", "20", "30", "60"}
 	unitLabels      = []string{"分钟", "秒"}
@@ -78,6 +84,12 @@ type alertState struct {
 	title   string
 	message string
 	update  *updateInfo
+}
+
+type toastState struct {
+	message string
+	undo    func()
+	id      int
 }
 
 type model struct {
@@ -107,17 +119,21 @@ type model struct {
 	updatePrompted bool
 	updating       bool
 
-	closeConfirm bool
-	closeDontAsk bool
-	closeAllow   func()
-	window       *app.Window
-	application  *app.Application
-	tray         *app.StatusItem
+	closeConfirm    bool
+	closeDontAsk    bool
+	closeAllow      func()
+	historyExpanded bool
+	toast           *toastState
+	toastID         int
+	window          *app.Window
+	application     *app.Application
+	tray            *app.StatusItem
 
 	tokenValue   string
 	pendingToken string
 
 	view        flex.View
+	toastView   flex.View
 	invalidator *app.Invalidator
 	monitor     *Monitor
 	tokenProxy  *TokenProxy
@@ -242,6 +258,7 @@ func (m *model) collectConfig() (Config, error) {
 	}
 	m.mu.Lock()
 	closeAction := m.cfg.CloseAction
+	history := append([]string(nil), m.cfg.HistoryCarnos...)
 	m.mu.Unlock()
 	return Config{
 		Region:          regionList[m.region].Key,
@@ -251,7 +268,26 @@ func (m *model) collectConfig() (Config, error) {
 		FreeMinutes:     free,
 		AdvanceSeconds:  advance,
 		CloseAction:     closeAction,
+		HistoryCarnos:   history,
 	}, nil
+}
+
+func addHistory(list []string, carno string) []string {
+	carno = strings.TrimSpace(carno)
+	if carno == "" {
+		return list
+	}
+	out := make([]string, 0, len(list)+1)
+	out = append(out, carno)
+	for _, v := range list {
+		if v != carno {
+			out = append(out, v)
+		}
+	}
+	if len(out) > 20 {
+		out = out[:20]
+	}
+	return out
 }
 
 func (m *model) stepAdvance(delta int) {
@@ -296,6 +332,7 @@ func (m *model) startMonitor() bool {
 		m.showError(err)
 		return false
 	}
+	cfg.HistoryCarnos = addHistory(cfg.HistoryCarnos, cfg.Carno)
 	if err := saveConfig(cfg); err != nil {
 		m.showError(err)
 		return false
@@ -410,6 +447,7 @@ func (m *model) paint(canvas *ui.Canvas, size ui.Size) {
 	m.pendingToken = ""
 	pendingUpdate := m.pendingUpdate
 	m.pendingUpdate = nil
+	toast := m.toast
 	if pendingUpdate != nil && alert == nil {
 		alert = &alertState{
 			kind:    alertUpdate,
@@ -425,30 +463,54 @@ func (m *model) paint(canvas *ui.Canvas, size ui.Size) {
 		m.tokenValue = pendingToken
 	}
 
-	m.view.Draw(canvas, theme, bounds, func(f *flex.Frame) {
-		f.Column().Fill().Pad(20).Gap(12).Children(func() {
-			f.Row().FillWidth().Items(flex.Center).Gap(8).Children(func() {
-				f.Text("停车时长监控").Bold().FontSize(20)
-				f.Text("v" + appVersion).Muted().FontSize(12).Self(flex.Center)
-				f.Spacer()
-				if f.Button(startBtnID, "开始监控").Disabled(running).Clicked() {
-					m.startMonitor()
-				}
-				if f.Button(stopBtnID, "停止监控").Outline().Disabled(!running).Clicked() {
-					m.stopMonitor()
-				}
-				if f.Button(configBtnID, "配置").Outline().Clicked() {
-					m.configOpen = true
-					m.requestPaint()
-				}
-			})
-			m.paintStatus(f, theme, st)
-			m.paintLog(f, theme, logs)
+	f := m.view.Begin(canvas, theme, bounds)
+	f.PopupLayer(10)
+	f.Column().Fill().Pad(20).Gap(12).Children(func() {
+		f.Row().FillWidth().Items(flex.Center).Gap(8).Children(func() {
+			f.Text("停车时长监控").Bold().FontSize(20)
+			f.Text("v" + appVersion).Muted().FontSize(12).Self(flex.Center)
+			f.Spacer()
+			if f.Button(startBtnID, "开始监控").Disabled(running).Clicked() {
+				m.startMonitor()
+			}
+			if f.Button(stopBtnID, "停止监控").Outline().Disabled(!running).Clicked() {
+				m.stopMonitor()
+			}
+			if f.Button(configBtnID, "配置").Outline().Clicked() {
+				m.configOpen = true
+				m.requestPaint()
+			}
 		})
-		m.paintConfigDialog(f, theme)
-		m.paintDialog(f, alert)
-		m.paintCloseDialog(f, theme)
+		m.paintStatus(f, theme, st)
+		m.paintLog(f, theme, logs)
 	})
+	m.paintConfigDialog(f, theme)
+	m.paintDialog(f, alert)
+	m.paintCloseDialog(f, theme)
+	f.End()
+
+	if toast != nil {
+		canvas.PushLayer(20)
+		scope := ui.ID{}
+		switch {
+		case m.closeConfirm:
+			scope = closeSurface
+		case m.configOpen:
+			scope = configSurface
+		case alert != nil:
+			scope = dialogSurface
+		}
+		if !scope.IsZero() {
+			canvas.PushFocusScope(scope)
+		}
+		m.toastView.Draw(canvas, theme, bounds, func(tf *flex.Frame) {
+			m.paintToast(tf, bounds, theme, toast)
+		})
+		if !scope.IsZero() {
+			canvas.PopFocusScope()
+		}
+		canvas.PopLayer()
+	}
 }
 
 func (m *model) configSummary() string {
@@ -469,7 +531,6 @@ func (m *model) paintConfigDialog(f *flex.Frame, theme ui.Theme) {
 	d := f.Dialog(flex.DialogSpec{
 		Title:     "监控配置",
 		Width:     520,
-		Height:    560,
 		Scope:     configSurface,
 		DismissID: configDismiss,
 		CloseID:   configDismiss,
@@ -509,6 +570,7 @@ func (m *model) paintForm(f *flex.Frame, theme ui.Theme) {
 		f.Column().Gap(4).Children(func() {
 			f.Text("车牌号").FontSize(12).Muted()
 			f.Field(&m.carnoField, carnoFieldID, "车牌号", "例如：京A12345")
+			m.paintHistoryTags(f, theme)
 		})
 
 		f.Column().Gap(4).Children(func() {
@@ -564,6 +626,161 @@ func (m *model) paintForm(f *flex.Frame, theme ui.Theme) {
 			})
 		})
 
+	})
+}
+
+func (m *model) paintHistoryTags(f *flex.Frame, theme ui.Theme) {
+	m.mu.Lock()
+	history := append([]string(nil), m.cfg.HistoryCarnos...)
+	m.mu.Unlock()
+	if len(history) == 0 {
+		return
+	}
+
+	const perRow, rowLimit = 4, 8
+	shown := history
+	if !m.historyExpanded && len(shown) > rowLimit {
+		shown = shown[:rowLimit]
+	}
+	for start := 0; start < len(shown); start += perRow {
+		end := min(start+perRow, len(shown))
+		f.Row().Gap(6).Children(func() {
+			for i := start; i < end; i++ {
+				m.paintHistoryTag(f, theme, shown[i])
+			}
+		})
+	}
+	if len(history) > rowLimit {
+		label := fmt.Sprintf("展开（%d）", len(history))
+		if m.historyExpanded {
+			label = "收起"
+		}
+		if f.Button(historyToggleID, label).Ghost().Clicked() {
+			m.historyExpanded = !m.historyExpanded
+			m.requestPaint()
+		}
+	}
+}
+
+func (m *model) paintHistoryTag(f *flex.Frame, theme ui.Theme, carno string) {
+	useID := tree.ID(historyScope, carno)
+	deleteID := tree.ID(historyDeleteScope, carno)
+	f.Row().Height(26).Background(theme.Muted).Radius(13).PadSides(0, 6, 0, 10).Gap(6).Items(flex.Center).Children(func() {
+		if f.Text(carno).FontSize(12).Hit(useID, "使用车牌 "+carno).Clicked() {
+			m.carnoField.SetText(carno)
+			m.requestPaint()
+		}
+		if f.Text("×").FontSize(14).Color(theme.MutedForeground).Hit(deleteID, "删除历史车牌 "+carno).HitOutset(6, 6, 6, 6).Clicked() {
+			m.deleteHistory(carno)
+		}
+	})
+}
+
+func (m *model) deleteHistory(carno string) {
+	m.mu.Lock()
+	list := append([]string(nil), m.cfg.HistoryCarnos...)
+	idx := -1
+	for i, v := range list {
+		if v == carno {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		m.mu.Unlock()
+		return
+	}
+	list = append(list[:idx], list[idx+1:]...)
+	m.cfg.HistoryCarnos = list
+	cfg := m.cfg
+	m.mu.Unlock()
+
+	if err := saveConfig(cfg); err != nil {
+		m.log("保存历史车牌失败：" + err.Error())
+	}
+	m.showToast("已删除历史车牌 "+carno, func() { m.restoreHistory(carno, idx) })
+}
+
+func (m *model) restoreHistory(carno string, idx int) {
+	m.mu.Lock()
+	list := append([]string(nil), m.cfg.HistoryCarnos...)
+	exists := false
+	for _, v := range list {
+		if v == carno {
+			exists = true
+			break
+		}
+	}
+	if !exists {
+		if idx < 0 || idx > len(list) {
+			idx = 0
+		}
+		list = append(list[:idx], append([]string{carno}, list[idx:]...)...)
+	}
+	m.cfg.HistoryCarnos = list
+	cfg := m.cfg
+	m.mu.Unlock()
+
+	if err := saveConfig(cfg); err != nil {
+		m.log("恢复历史车牌失败：" + err.Error())
+	}
+	m.requestPaint()
+}
+
+func (m *model) showToast(message string, undo func()) {
+	m.mu.Lock()
+	m.toastID++
+	id := m.toastID
+	m.toast = &toastState{message: message, undo: undo, id: id}
+	m.mu.Unlock()
+	m.requestPaint()
+
+	go func() {
+		time.Sleep(10 * time.Second)
+		m.mu.Lock()
+		if m.toast != nil && m.toast.id == id {
+			m.toast = nil
+		}
+		m.mu.Unlock()
+		m.requestPaint()
+	}()
+}
+
+func (m *model) dismissToast() {
+	m.mu.Lock()
+	m.toast = nil
+	m.mu.Unlock()
+	m.requestPaint()
+}
+
+func (m *model) undoToast() {
+	m.mu.Lock()
+	t := m.toast
+	m.toast = nil
+	m.mu.Unlock()
+	if t != nil && t.undo != nil {
+		t.undo()
+	}
+	m.requestPaint()
+}
+
+func (m *model) paintToast(f *flex.Frame, bounds ui.Rect, theme ui.Theme, toast *toastState) {
+	if toast == nil {
+		return
+	}
+	const width, height = float32(360), float32(88)
+	f.Popup().At(bounds.Width-width-20, bounds.Height-height-20).Width(width).Children(func() {
+		f.Column().FillWidth().Height(height).Background(theme.CardElevated).Border(1, theme.Border).Radius(12).Pad(12).Gap(8).Children(func() {
+			f.Text(toast.message).FontSize(13)
+			f.Row().FillWidth().Gap(8).Justify(flex.End).Children(func() {
+				if f.Button(toastCloseID, "关闭").Ghost().Clicked() {
+					m.dismissToast()
+				}
+				if f.Button(toastUndoID, "撤销").Outline().Clicked() {
+					m.undoToast()
+				}
+			})
+		})
 	})
 }
 
