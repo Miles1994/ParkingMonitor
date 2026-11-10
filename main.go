@@ -832,7 +832,7 @@ func (m *model) paintStatus(f *flex.Frame, theme ui.Theme, st MonitorStatus) {
 		})
 
 		if st.InPark {
-			f.Text("距离 " + strconv.Itoa(m.currentFreeMinutes()) + " 分钟免费时长结束").Muted().Self(flex.Center)
+			f.Text("距离 " + strconv.Itoa(m.currentFreeMinutes()) + " 分钟倒计时结束").Muted().Self(flex.Center)
 
 			countdown := formatRemaining(st.Remaining)
 			txt := f.Text(countdown).FontSize(46).Bold().Self(flex.Center)
