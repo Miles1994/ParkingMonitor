@@ -121,7 +121,7 @@ func (m *Monitor) Start() {
 	m.mu.Unlock()
 
 	m.pushStatus()
-	m.log(fmt.Sprintf("开始监控：车牌 %s，查询间隔 %d 分钟，免费时长 %d 分钟", cfg.Carno, cfg.IntervalMinutes, cfg.FreeMinutes))
+	m.log(fmt.Sprintf("开始监控：车牌 %s，查询间隔 %d 分钟，计时时长 %d 分钟", cfg.Carno, cfg.IntervalMinutes, cfg.FreeMinutes))
 
 	go m.loop(ctx)
 	go m.ticker(ctx)
@@ -366,7 +366,7 @@ func (m *Monitor) ticker(ctx context.Context) {
 					Overdue:     remaining < 0,
 					FreeMinutes: int(free / time.Minute),
 				}
-				m.log("免费时长倒计时结束，触发提醒")
+				m.log("计时时长倒计时结束，触发提醒")
 				if m.onAlert != nil {
 					m.onAlert(alert)
 				}

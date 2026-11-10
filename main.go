@@ -202,7 +202,7 @@ func (m *model) clearAlert() {
 }
 
 func (m *model) onEntryAlert(info EntryInfo) {
-	msg := fmt.Sprintf("车牌 %s 已入场。\n入场时间：%s\n地点：%s\n免费时长：%d 分钟",
+	msg := fmt.Sprintf("车牌 %s 已入场。\n入场时间：%s\n地点：%s\n计时时长：%d 分钟",
 		info.Carno, info.Entry.Format("2006-01-02 15:04:05"), info.ParkName, info.FreeMinutes)
 	m.mu.Lock()
 	m.alert = &alertState{kind: alertEntry, title: "车辆已入场", message: msg}
@@ -216,18 +216,18 @@ func (m *model) onEntryAlert(info EntryInfo) {
 func (m *model) onFreeAlert(a AlertInfo) {
 	var msg string
 	if a.Remaining > 0 {
-		msg = fmt.Sprintf("车牌 %s 已停车 %s（入场时间 %s）。\n预计还剩 %s 达到免费时长上限，请及时挪车或缴费。\n地点：%s",
+		msg = fmt.Sprintf("车牌 %s 已停车 %s（入场时间 %s）。\n预计还剩 %s 达到计时时长上限，请及时挪车或缴费。\n地点：%s",
 			a.Carno, formatDuration(a.Elapsed), a.Entry.Format("01-02 15:04"), formatDuration(a.Remaining), a.ParkName)
 	} else {
-		msg = fmt.Sprintf("车牌 %s 已停车 %s（入场时间 %s）。\n%d 分钟免费时长已结束，请及时挪车或缴费。\n地点：%s",
+		msg = fmt.Sprintf("车牌 %s 已停车 %s（入场时间 %s）。\n%d 分钟计时时长已结束，请及时挪车或缴费。\n地点：%s",
 			a.Carno, formatDuration(a.Elapsed), a.Entry.Format("01-02 15:04"), a.FreeMinutes, a.ParkName)
 	}
 	m.mu.Lock()
-	m.alert = &alertState{kind: alertFree, title: "免费停车即将结束", message: msg}
+	m.alert = &alertState{kind: alertFree, title: "停车计时即将结束", message: msg}
 	m.mu.Unlock()
-	m.log("免费时长提醒已触发")
+	m.log("计时提醒已触发")
 	playAlertSound()
-	go func() { _ = sendSystemNotification("免费停车即将结束", msg) }()
+	go func() { _ = sendSystemNotification("停车计时即将结束", msg) }()
 	m.requestPaint()
 }
 
@@ -249,14 +249,14 @@ func (m *model) collectConfig() (Config, error) {
 	}
 	free, err := parseFreeMinutes(m.freeField.Text())
 	if err != nil {
-		return Config{}, fmt.Errorf("免费时长无效：%v", err)
+		return Config{}, fmt.Errorf("计时时长无效：%v", err)
 	}
 	advance, err := advanceToSeconds(m.advanceField.Text(), unitLabels[m.unit])
 	if err != nil {
 		return Config{}, fmt.Errorf("提前提醒无效：%v", err)
 	}
 	if advance > free*60 {
-		return Config{}, errors.New("提前提醒时间不能大于免费时长")
+		return Config{}, errors.New("提前提醒时间不能大于计时时长")
 	}
 	m.mu.Lock()
 	closeAction := m.cfg.CloseAction
@@ -524,7 +524,7 @@ func (m *model) configSummary() string {
 	}
 	interval := strings.TrimSpace(m.intervalField.Text())
 	free := strings.TrimSpace(m.freeField.Text())
-	return fmt.Sprintf("%s · %s · 每 %s 分钟 · 免费 %s 分钟", region, carno, interval, free)
+	return fmt.Sprintf("%s · %s · 每 %s 分钟 · 计时 %s 分钟", region, carno, interval, free)
 }
 
 func (m *model) paintConfigDialog(f *flex.Frame, theme ui.Theme) {
@@ -604,9 +604,9 @@ func (m *model) paintForm(f *flex.Frame, theme ui.Theme) {
 		})
 
 		f.Column().Gap(4).Children(func() {
-			f.Text("免费时长（分钟）").FontSize(12).Muted()
+			f.Text("计时时长（分钟）").FontSize(12).Muted()
 			f.Row().Gap(8).Items(flex.Center).Children(func() {
-				f.Field(&m.freeField, freeFieldID, "免费时长", "默认 15").Grow(1)
+				f.Field(&m.freeField, freeFieldID, "计时时长", "默认 15").Grow(1)
 				if i, ok := f.Select(freeScope, &m.freeSel, freePresets, -1).Placeholder("常用值").Width(110).Picked(); ok {
 					m.freeField.SetText(freePresets[i])
 				}
