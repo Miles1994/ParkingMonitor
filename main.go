@@ -311,6 +311,7 @@ func (m *model) saveConfigFromForm() {
 		m.showError(err)
 		return
 	}
+	cfg.HistoryCarnos = addHistory(cfg.HistoryCarnos, cfg.Carno)
 	if err := saveConfig(cfg); err != nil {
 		m.showError(err)
 		return
