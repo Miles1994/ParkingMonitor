@@ -31,6 +31,8 @@ var (
 	advPlusID       = tree.ID(page, "adv-plus")
 	logAreaID       = tree.ID(page, "log")
 	logScrollID     = tree.ID(page, "log-scroll")
+	logViewID       = tree.ID(page, "log-view")
+	logClearID      = tree.ID(page, "log-clear")
 	configBtnID     = tree.ID(page, "config")
 	configCloseID   = tree.ID(page, "config-close")
 
@@ -38,6 +40,13 @@ var (
 	freeScope     = tree.Sub(page, tree.Name("free-select"))
 	regionScope   = tree.Sub(page, tree.Name("region-select"))
 	unitScope     = tree.Sub(page, tree.Name("unit-select"))
+	notifyScope   = tree.Sub(page, tree.Name("notify-style"))
+	statsScope    = tree.Sub(page, tree.Name("stats-range"))
+
+	logDialogScope   = tree.Sub(page, tree.Name("log-dialog"))
+	logDialogSurface = tree.ID(logDialogScope, "surface")
+	logDialogDismiss = tree.ID(logDialogScope, "dismiss")
+	logDialogCloseID = tree.ID(logDialogScope, "close")
 
 	dialogScope    = tree.Sub(page, tree.Name("dialog"))
 	dialogSurface  = tree.ID(dialogScope, "surface")
@@ -67,6 +76,9 @@ var (
 	intervalPresets = []string{"5", "10", "15", "30"}
 	freePresets     = []string{"10", "15", "20", "30", "60"}
 	unitLabels      = []string{"分钟", "秒"}
+	notifyLabels    = []string{"侧边通知", "弹出框"}
+	notifyKeys      = []string{"side", "popup"}
+	statsLabels     = []string{"当日", "本周", "本月"}
 )
 
 type alertKind int
@@ -114,12 +126,19 @@ type model struct {
 	running        bool
 	status         MonitorStatus
 	logs           []string
+	logsOpen       bool
 	alert          *alertState
 	configOpen     bool
 	logScroll      flex.SliderState
 	pendingUpdate  *updateInfo
 	updatePrompted bool
 	updating       bool
+	alertTopmost   bool
+
+	notify     int
+	statsRange int
+	entries    *entryStore
+	logFile    *logFile
 
 	closeConfirm    bool
 	closeDontAsk    bool
@@ -154,6 +173,11 @@ func newModel(cfg Config) *model {
 		m.unit = 1
 	}
 	m.region = regionIndex(cfg.Region)
+	if cfg.NotifyStyle == "popup" {
+		m.notify = 1
+	}
+	m.entries = loadEntryStore()
+	m.logFile = newLogFile()
 	m.status.Phase = "未开始"
 	return m
 }
@@ -165,12 +189,14 @@ func (m *model) requestPaint() {
 }
 
 func (m *model) log(msg string) {
+	now := time.Now()
 	m.mu.Lock()
-	m.logs = append(m.logs, time.Now().Format("15:04:05")+"  "+msg)
+	m.logs = append(m.logs, now.Format("15:04:05")+"  "+msg)
 	if len(m.logs) > 150 {
 		m.logs = m.logs[len(m.logs)-150:]
 	}
 	m.mu.Unlock()
+	m.logFile.write(now, msg)
 	m.requestPaint()
 }
 
@@ -197,7 +223,12 @@ func (m *model) showError(err error) {
 func (m *model) clearAlert() {
 	m.mu.Lock()
 	m.alert = nil
+	top := m.alertTopmost
+	m.alertTopmost = false
 	m.mu.Unlock()
+	if top && m.window != nil {
+		_ = m.window.SetAlwaysOnTop(false)
+	}
 	m.requestPaint()
 }
 
@@ -208,6 +239,9 @@ func (m *model) onEntryAlert(info EntryInfo) {
 	m.alert = &alertState{kind: alertEntry, title: "车辆已入场", message: msg}
 	m.mu.Unlock()
 	m.log("检测到车辆入场：" + info.Carno)
+	if m.entries.add(info) {
+		m.requestPaint()
+	}
 	playAlertSound()
 	go func() { _ = sendSystemNotification("车辆已入场", msg) }()
 	m.requestPaint()
@@ -223,12 +257,37 @@ func (m *model) onFreeAlert(a AlertInfo) {
 			a.Carno, formatDuration(a.Elapsed), a.Entry.Format("01-02 15:04"), a.FreeMinutes, a.ParkName)
 	}
 	m.mu.Lock()
-	m.alert = &alertState{kind: alertFree, title: "停车计时即将结束", message: msg}
+	popup := m.cfg.NotifyStyle == "popup"
+	if popup {
+		m.alert = &alertState{kind: alertFree, title: "停车计时即将结束", message: msg}
+	}
 	m.mu.Unlock()
-	m.log("计时提醒已触发")
+
 	playAlertSound()
-	go func() { _ = sendSystemNotification("停车计时即将结束", msg) }()
+	if popup {
+		m.log("计时提醒已触发（弹出框）")
+		m.showAlertWindow("停车计时即将结束", msg)
+	} else {
+		m.log("计时提醒已触发（侧边通知）")
+		go func() { _ = sendSystemNotification("停车计时即将结束", msg) }()
+	}
 	m.requestPaint()
+}
+
+// showAlertWindow 把主窗口从托盘或最小化状态恢复到前台并临时置顶，
+// 确保窗口内的居中提醒能被看到；置顶状态在关闭提醒时复位。
+func (m *model) showAlertWindow(title, msg string) {
+	window := m.window
+	if window == nil {
+		go func() { _ = sendSystemNotification(title, msg) }()
+		return
+	}
+	window.Show()
+	if err := window.SetAlwaysOnTop(true); err == nil {
+		m.mu.Lock()
+		m.alertTopmost = true
+		m.mu.Unlock()
+	}
 }
 
 func (m *model) collectConfig() (Config, error) {
@@ -269,6 +328,7 @@ func (m *model) collectConfig() (Config, error) {
 		IntervalMinutes: interval,
 		FreeMinutes:     free,
 		AdvanceSeconds:  advance,
+		NotifyStyle:     notifyKeys[m.notify],
 		CloseAction:     closeAction,
 		HistoryCarnos:   history,
 	}, nil
@@ -320,6 +380,7 @@ func (m *model) saveConfigFromForm() {
 	m.cfg = cfg
 	m.mu.Unlock()
 	m.log("配置已保存")
+	m.showNotice("配置已保存")
 }
 
 func (m *model) startMonitor() bool {
@@ -485,9 +546,11 @@ func (m *model) paint(canvas *ui.Canvas, size ui.Size) {
 			}
 		})
 		m.paintStatus(f, theme, st)
-		m.paintLog(f, theme, logs)
+		m.paintStats(f, theme)
+		m.paintLogBar(f)
 	})
 	m.paintConfigDialog(f, theme)
+	m.paintLogDialog(f, theme, logs)
 	m.paintDialog(f, alert)
 	m.paintCloseDialog(f, theme)
 	f.End()
@@ -498,10 +561,12 @@ func (m *model) paint(canvas *ui.Canvas, size ui.Size) {
 		switch {
 		case m.closeConfirm:
 			scope = closeSurface
-		case m.configOpen:
-			scope = configSurface
 		case alert != nil:
 			scope = dialogSurface
+		case m.logsOpen:
+			scope = logDialogSurface
+		case m.configOpen:
+			scope = configSurface
 		}
 		if !scope.IsZero() {
 			canvas.PushFocusScope(scope)
@@ -629,6 +694,15 @@ func (m *model) paintForm(f *flex.Frame, theme ui.Theme) {
 			})
 		})
 
+		f.Column().Gap(4).Children(func() {
+			f.Text("倒计时提醒方式").FontSize(12).Muted()
+			if i, ok := f.Choice(notifyScope, notifyLabels, m.notify).ChosenIndex(); ok {
+				m.notify = i
+				m.requestPaint()
+			}
+			f.Text("侧边：系统通知，不打断当前操作；弹出框：窗口居中并置顶").FontSize(11).Muted()
+		})
+
 	})
 }
 
@@ -731,7 +805,14 @@ func (m *model) restoreHistory(carno string, idx int) {
 }
 
 func (m *model) showToast(message string, undo func()) {
-	const lifetime = 10 * time.Second
+	m.startToast(message, 10*time.Second, undo)
+}
+
+func (m *model) showNotice(message string) {
+	m.startToast(message, 4*time.Second, nil)
+}
+
+func (m *model) startToast(message string, lifetime time.Duration, undo func()) {
 	m.mu.Lock()
 	m.toastID++
 	id := m.toastID
@@ -745,26 +826,18 @@ func (m *model) showToast(message string, undo func()) {
 	m.mu.Unlock()
 	m.requestPaint()
 
-	go func() {
-		ticker := time.NewTicker(200 * time.Millisecond)
-		defer ticker.Stop()
-		for range ticker.C {
-			m.mu.Lock()
-			t := m.toast
-			expired := t != nil && t.id == id && !time.Now().Before(t.expires)
-			if expired {
-				m.toast = nil
-			}
-			m.mu.Unlock()
-			if t == nil || t.id != id {
-				return
-			}
-			m.requestPaint()
-			if expired {
-				return
-			}
+	time.AfterFunc(lifetime, func() {
+		m.mu.Lock()
+		t := m.toast
+		expired := t != nil && t.id == id && !time.Now().Before(t.expires)
+		if expired {
+			m.toast = nil
 		}
-	}()
+		m.mu.Unlock()
+		if expired {
+			m.requestPaint()
+		}
+	})
 }
 
 func (m *model) dismissToast() {
@@ -804,11 +877,16 @@ func (m *model) paintToast(f *flex.Frame, bounds ui.Rect, theme ui.Theme, toast 
 				if f.Button(toastCloseID, "关闭").Ghost().Clicked() {
 					m.dismissToast()
 				}
-				if f.Button(toastUndoID, "撤销").Outline().Clicked() {
-					m.undoToast()
+				if toast.undo != nil {
+					if f.Button(toastUndoID, "撤销").Outline().Clicked() {
+						m.undoToast()
+					}
 				}
 			})
 			f.Slot().FillWidth().Height(3).Background(theme.Muted).Radius(2).DrawOver(func(d *flex.DrawContext) {
+				if fraction > 0 {
+					d.Canvas.RequestFrame()
+				}
 				progress := d.Rect.Width * fraction
 				if progress <= 0 {
 					return
@@ -875,18 +953,147 @@ func (m *model) currentFreeMinutes() int {
 	return 15
 }
 
-func (m *model) paintLog(f *flex.Frame, theme ui.Theme, logs []string) {
-	f.Column().FillWidth().Grow(1).Shrink(1).Background(theme.Card).Border(1, theme.Border).Radius(12).Pad(16).Gap(8).Children(func() {
-		f.Text("运行日志").Bold().FontSize(14)
+func (m *model) paintStats(f *flex.Frame, theme ui.Theme) {
+	carno := strings.TrimSpace(m.carnoField.Text())
+	buckets := buildChartBuckets(m.entries.snapshot(), carno, m.statsRange, time.Now())
+	f.Column().FillWidth().Grow(1).Shrink(1).MinHeight(220).Background(theme.Card).Border(1, theme.Border).Radius(12).Pad(16).Gap(8).Children(func() {
+		f.Row().FillWidth().Items(flex.Center).Gap(8).Children(func() {
+			f.Text("入场统计").Bold().FontSize(14)
+			label := carno
+			if label == "" {
+				label = "未填写车牌"
+			}
+			f.Text(label).Muted().FontSize(12)
+			f.Spacer()
+			if i, ok := f.Choice(statsScope, statsLabels, m.statsRange).ChosenIndex(); ok {
+				m.statsRange = i
+				m.requestPaint()
+			}
+		})
+		f.Slot().FillWidth().Grow(1).Shrink(1).MinHeight(160).DrawOver(func(d *flex.DrawContext) {
+			paintEntryChart(d, theme, buckets)
+		})
+	})
+}
+
+func paintEntryChart(d *flex.DrawContext, theme ui.Theme, buckets []chartBucket) {
+	rect := d.Rect
+	if rect.Width < 40 || rect.Height < 40 {
+		return
+	}
+	total, maxCount := 0, 0
+	for _, b := range buckets {
+		total += b.Count
+		if b.Count > maxCount {
+			maxCount = b.Count
+		}
+	}
+	if total == 0 {
+		d.Canvas.LabelCenter("暂无入场记录",
+			ui.Rect{X: rect.X, Y: rect.Y + rect.Height/2 - 8, Width: rect.Width, Height: 16},
+			ui.TextStyle{Size: 12, Color: theme.MutedForeground})
+		return
+	}
+
+	const labelH, valueH = float32(16), float32(14)
+	plot := ui.Rect{X: rect.X + 4, Y: rect.Y + valueH, Width: rect.Width - 8, Height: rect.Height - valueH - labelH}
+	if plot.Width < 20 || plot.Height < 20 {
+		return
+	}
+
+	gap := float32(4)
+	if len(buckets) > 14 {
+		gap = 2
+	}
+	barW := (plot.Width - gap*float32(len(buckets)-1)) / float32(len(buckets))
+	if barW <= 0 {
+		return
+	}
+	scale := float32(maxCount + 1)
+
+	for i := 0; i <= 2; i++ {
+		y := plot.Y + plot.Height*float32(i)/2
+		d.Canvas.Fill(ui.Rect{X: plot.X, Y: y, Width: plot.Width, Height: 1}, theme.Border)
+	}
+
+	for i, b := range buckets {
+		x := plot.X + float32(i)*(barW+gap)
+		if b.Count > 0 {
+			h := float32(b.Count) / scale * plot.Height
+			if h < 2 {
+				h = 2
+			}
+			y := plot.Y + plot.Height - h
+			color := theme.Primary
+			if b.Current {
+				color = theme.Success
+			}
+			d.Canvas.Rounded(ui.Rect{X: x, Y: y, Width: barW, Height: h}, min(float32(3), h/2), color)
+			d.Canvas.LabelCenter(strconv.Itoa(b.Count),
+				ui.Rect{X: x - 4, Y: y - valueH, Width: barW + 8, Height: valueH},
+				ui.TextStyle{Size: 10, Color: theme.MutedForeground})
+		}
+		if b.ShowLabel {
+			d.Canvas.LabelCenter(b.Label,
+				ui.Rect{X: x - 10, Y: plot.Y + plot.Height + 2, Width: barW + 20, Height: labelH},
+				ui.TextStyle{Size: 10, Color: theme.MutedForeground})
+		}
+	}
+}
+
+func (m *model) paintLogBar(f *flex.Frame) {
+	f.Row().FillWidth().Items(flex.Center).Gap(8).Children(func() {
+		f.Text("监控日志").Bold().FontSize(14)
+		if f.Button(logViewID, "查看").Outline().Clicked() {
+			m.logsOpen = true
+			m.requestPaint()
+		}
+	})
+}
+
+func (m *model) paintLogDialog(f *flex.Frame, theme ui.Theme, logs []string) {
+	if !m.logsOpen {
+		return
+	}
+	d := f.Dialog(flex.DialogSpec{
+		Title:     "监控日志",
+		Width:     680,
+		Height:    520,
+		Scope:     logDialogSurface,
+		DismissID: logDialogDismiss,
+		CloseID:   logDialogDismiss,
+	})
+	d.Body(func() {
 		f.Row().FillWidth().Grow(1).Shrink(1).Gap(8).Children(func() {
 			f.ScrollArea(logAreaID).Grow(1).Shrink(1).FillHeight().Follow(true).Gap(4).Children(func() {
+				if len(logs) == 0 {
+					f.Text("暂无日志").Muted().FontSize(12)
+				}
 				for _, line := range logs {
 					f.Text(line).FontSize(12).Color(theme.Foreground)
 				}
 			})
 			m.paintLogScrollbar(f, theme)
 		})
+		if dir := m.logFile.Dir(); dir != "" {
+			f.Text("日志文件：" + dir + "（保留 " + strconv.Itoa(logRetentionDays) + " 天）").Muted().FontSize(11)
+		}
 	})
+	d.Footer(func() {
+		if f.Button(logClearID, "清空列表").Outline().Clicked() {
+			m.mu.Lock()
+			m.logs = nil
+			m.mu.Unlock()
+			m.requestPaint()
+		}
+		if f.Button(logDialogCloseID, "关闭").Clicked() {
+			m.logsOpen = false
+			m.requestPaint()
+		}
+	})
+	if d.Dismissed() {
+		m.logsOpen = false
+	}
 }
 
 func (m *model) paintLogScrollbar(f *flex.Frame, theme ui.Theme) {

@@ -14,6 +14,7 @@ type Config struct {
 	IntervalMinutes int      `json:"interval_minutes"`
 	FreeMinutes     int      `json:"free_minutes"`
 	AdvanceSeconds  int      `json:"advance_seconds"`
+	NotifyStyle     string   `json:"notify_style"`
 	CloseAction     string   `json:"close_action"`
 	HistoryCarnos   []string `json:"history_carnos"`
 }
@@ -64,6 +65,9 @@ func normalizeConfig(cfg *Config) {
 	}
 	if limit := cfg.FreeMinutes * 60; cfg.AdvanceSeconds > limit {
 		cfg.AdvanceSeconds = limit
+	}
+	if cfg.NotifyStyle != "popup" {
+		cfg.NotifyStyle = "side"
 	}
 	if cfg.CloseAction != "tray" && cfg.CloseAction != "exit" {
 		cfg.CloseAction = ""
