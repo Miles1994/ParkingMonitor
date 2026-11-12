@@ -26,6 +26,7 @@ var (
 	saveBtnID       = tree.ID(page, "save")
 	startBtnID      = tree.ID(page, "start")
 	stopBtnID       = tree.ID(page, "stop")
+	paidBtnID       = tree.ID(page, "paid")
 	autoBtnID       = tree.ID(page, "auto")
 	advMinusID      = tree.ID(page, "adv-minus")
 	advPlusID       = tree.ID(page, "adv-plus")
@@ -539,6 +540,10 @@ func (m *model) paint(canvas *ui.Canvas, size ui.Size) {
 			}
 			if f.Button(stopBtnID, "停止监控").Outline().Disabled(!running).Clicked() {
 				m.stopMonitor()
+			}
+			if f.Button(paidBtnID, "已缴费").Outline().Disabled(!st.InPark).Clicked() {
+				m.markPaid()
+				m.showNotice("已标记缴费，监控状态已重置")
 			}
 			if f.Button(configBtnID, "配置").Outline().Clicked() {
 				m.configOpen = true
