@@ -18,30 +18,34 @@ var (
 	tree = ui.Tree{}
 	page = tree.Feature("main")
 
-	carnoFieldID    = tree.ID(page, "carno")
-	tokenFieldID    = tree.ID(page, "token")
-	intervalFieldID = tree.ID(page, "interval")
-	freeFieldID     = tree.ID(page, "free")
-	advanceFieldID  = tree.ID(page, "advance")
-	saveBtnID       = tree.ID(page, "save")
-	startBtnID      = tree.ID(page, "start")
-	stopBtnID       = tree.ID(page, "stop")
-	paidBtnID       = tree.ID(page, "paid")
-	autoBtnID       = tree.ID(page, "auto")
-	advMinusID      = tree.ID(page, "adv-minus")
-	advPlusID       = tree.ID(page, "adv-plus")
-	logAreaID       = tree.ID(page, "log")
-	logScrollID     = tree.ID(page, "log-scroll")
-	logViewID       = tree.ID(page, "log-view")
-	logClearID      = tree.ID(page, "log-clear")
-	configBtnID     = tree.ID(page, "config")
-	configCloseID   = tree.ID(page, "config-close")
+	carnoFieldID     = tree.ID(page, "carno")
+	tokenFieldID     = tree.ID(page, "token")
+	intervalFieldID  = tree.ID(page, "interval")
+	freeFieldID      = tree.ID(page, "free")
+	advanceFieldID   = tree.ID(page, "advance")
+	pushTokenFieldID = tree.ID(page, "pushplus-token")
+	ntfyTopicFieldID = tree.ID(page, "ntfy-topic")
+	saveBtnID        = tree.ID(page, "save")
+	startBtnID       = tree.ID(page, "start")
+	stopBtnID        = tree.ID(page, "stop")
+	paidBtnID        = tree.ID(page, "paid")
+	autoBtnID        = tree.ID(page, "auto")
+	advMinusID       = tree.ID(page, "adv-minus")
+	advPlusID        = tree.ID(page, "adv-plus")
+	logAreaID        = tree.ID(page, "log")
+	logScrollID      = tree.ID(page, "log-scroll")
+	logViewID        = tree.ID(page, "log-view")
+	logClearID       = tree.ID(page, "log-clear")
+	configBtnID      = tree.ID(page, "config")
+	githubLinkID     = tree.ID(page, "github")
+	configCloseID    = tree.ID(page, "config-close")
 
 	intervalScope = tree.Sub(page, tree.Name("interval-select"))
 	freeScope     = tree.Sub(page, tree.Name("free-select"))
 	regionScope   = tree.Sub(page, tree.Name("region-select"))
 	unitScope     = tree.Sub(page, tree.Name("unit-select"))
 	notifyScope   = tree.Sub(page, tree.Name("notify-style"))
+	remoteScope   = tree.Sub(page, tree.Name("remote-channel"))
 	statsScope    = tree.Sub(page, tree.Name("stats-range"))
 
 	logDialogScope   = tree.Sub(page, tree.Name("log-dialog"))
@@ -79,6 +83,8 @@ var (
 	unitLabels      = []string{"分钟", "秒"}
 	notifyLabels    = []string{"侧边通知", "弹出框"}
 	notifyKeys      = []string{"side", "popup"}
+	remoteLabels    = []string{"不启用", "PushPlus", "ntfy"}
+	remoteKeys      = []string{"", "pushplus", "ntfy"}
 	statsLabels     = []string{"当日", "本周", "本月"}
 )
 
@@ -112,10 +118,12 @@ type model struct {
 
 	cfg Config
 
-	carnoField    flex.Field
-	intervalField flex.Field
-	freeField     flex.Field
-	advanceField  flex.Field
+	carnoField     flex.Field
+	intervalField  flex.Field
+	freeField      flex.Field
+	advanceField   flex.Field
+	pushTokenField flex.Field
+	ntfyTopicField flex.Field
 
 	intervalSel flex.SelectState
 	freeSel     flex.SelectState
@@ -123,6 +131,7 @@ type model struct {
 	regionSel   flex.SelectState
 	unit        int
 	region      int
+	remote      int
 
 	running        bool
 	status         MonitorStatus
@@ -167,6 +176,9 @@ func newModel(cfg Config) *model {
 	m.tokenValue = cfg.Token
 	m.intervalField.SetText(strconv.Itoa(cfg.IntervalMinutes))
 	m.freeField.SetText(strconv.Itoa(cfg.FreeMinutes))
+	m.pushTokenField.SetText(cfg.PushPlusToken)
+	m.ntfyTopicField.SetText(cfg.NtfyTopic)
+	m.remote = remoteIndex(cfg.RemoteChannel)
 
 	advValue, advUnit := secondsToAdvance(cfg.AdvanceSeconds)
 	m.advanceField.SetText(strconv.Itoa(advValue))
@@ -181,6 +193,15 @@ func newModel(cfg Config) *model {
 	m.logFile = newLogFile()
 	m.status.Phase = "未开始"
 	return m
+}
+
+func remoteIndex(key string) int {
+	for i, k := range remoteKeys {
+		if k == key {
+			return i
+		}
+	}
+	return 0
 }
 
 func (m *model) requestPaint() {
@@ -245,6 +266,7 @@ func (m *model) onEntryAlert(info EntryInfo) {
 	}
 	playAlertSound()
 	go func() { _ = sendSystemNotification("车辆已入场", msg) }()
+	m.sendRemote("车辆已入场", msg)
 	m.requestPaint()
 }
 
@@ -272,7 +294,24 @@ func (m *model) onFreeAlert(a AlertInfo) {
 		m.log("计时提醒已触发（侧边通知）")
 		go func() { _ = sendSystemNotification("停车计时即将结束", msg) }()
 	}
+	m.sendRemote("停车计时即将结束", msg)
 	m.requestPaint()
+}
+
+func (m *model) sendRemote(title, body string) {
+	m.mu.Lock()
+	notifier := newRemoteNotifier(m.cfg)
+	m.mu.Unlock()
+	if notifier == nil {
+		return
+	}
+	go func() {
+		if err := notifier.send(title, body); err != nil {
+			m.log("远程通知发送失败（" + notifier.label() + "）：" + err.Error())
+			return
+		}
+		m.log("已发送远程通知（" + notifier.label() + "）")
+	}()
 }
 
 // showAlertWindow 把主窗口从托盘或最小化状态恢复到前台并临时置顶，
@@ -318,6 +357,19 @@ func (m *model) collectConfig() (Config, error) {
 	if advance > free*60 {
 		return Config{}, errors.New("提前提醒时间不能大于计时时长")
 	}
+	remote := remoteKeys[m.remote]
+	pushToken := strings.TrimSpace(m.pushTokenField.Text())
+	ntfyTopic := strings.TrimSpace(m.ntfyTopicField.Text())
+	switch remote {
+	case "pushplus":
+		if pushToken == "" {
+			return Config{}, errors.New("请填写 PushPlus Token")
+		}
+	case "ntfy":
+		if !ntfyTopicPattern.MatchString(ntfyTopic) {
+			return Config{}, errors.New("ntfy 主题只能包含字母、数字、下划线和连字符，长度 1-64")
+		}
+	}
 	m.mu.Lock()
 	closeAction := m.cfg.CloseAction
 	history := append([]string(nil), m.cfg.HistoryCarnos...)
@@ -330,6 +382,9 @@ func (m *model) collectConfig() (Config, error) {
 		FreeMinutes:     free,
 		AdvanceSeconds:  advance,
 		NotifyStyle:     notifyKeys[m.notify],
+		RemoteChannel:   remote,
+		PushPlusToken:   pushToken,
+		NtfyTopic:       ntfyTopic,
 		CloseAction:     closeAction,
 		HistoryCarnos:   history,
 	}, nil
@@ -534,6 +589,12 @@ func (m *model) paint(canvas *ui.Canvas, size ui.Size) {
 		f.Row().FillWidth().Items(flex.Center).Gap(8).Children(func() {
 			f.Text("停车时长监控").Bold().FontSize(20)
 			f.Text("v" + appVersion).Muted().FontSize(12).Self(flex.Center)
+			if f.Icon(githubIcon).Size(16, 16).Color(theme.MutedForeground).Self(flex.Center).
+				Hit(githubLinkID, "GitHub 仓库").
+				Hover(flex.Look{}.Color(theme.Foreground)).
+				Clicked() {
+				openURL(githubRepoURL)
+			}
 			f.Spacer()
 			if f.Button(startBtnID, "开始监控").Disabled(running).Clicked() {
 				m.startMonitor()
@@ -706,6 +767,22 @@ func (m *model) paintForm(f *flex.Frame, theme ui.Theme) {
 				m.requestPaint()
 			}
 			f.Text("侧边：系统通知，不打断当前操作；弹出框：窗口居中并置顶").FontSize(11).Muted()
+		})
+
+		f.Column().Gap(4).Children(func() {
+			f.Text("远程通知（同步到手机）").FontSize(12).Muted()
+			if i, ok := f.Choice(remoteScope, remoteLabels, m.remote).ChosenIndex(); ok {
+				m.remote = i
+				m.requestPaint()
+			}
+			switch remoteKeys[m.remote] {
+			case "pushplus":
+				f.Field(&m.pushTokenField, pushTokenFieldID, "PushPlus Token", "pushplus.plus → 一对一推送 → 用户 Token")
+				f.Text("关注「pushplus 推送加」公众号即可收到，实名后 200 条/天").FontSize(11).Muted()
+			case "ntfy":
+				f.Field(&m.ntfyTopicField, ntfyTopicFieldID, "ntfy 主题", "例如：parking-zx-9281")
+				f.Text("手机 ntfy App 订阅同一主题即可收到，公共服务器 ntfy.sh，250 条/天").FontSize(11).Muted()
+			}
 		})
 
 	})
@@ -1293,6 +1370,26 @@ func (m *model) quitFromTray() {
 	}
 }
 
+func (m *model) appConfig() app.Config {
+	config := app.Config{
+		Title:       "停车时长监控",
+		Width:       760,
+		Height:      900,
+		MinWidth:    640,
+		MinHeight:   720,
+		Invalidator: m.invalidator,
+		TextInput: flex.Fields(
+			&m.carnoField, &m.intervalField, &m.freeField, &m.advanceField,
+			&m.pushTokenField, &m.ntfyTopicField,
+		),
+		OnScroll:       m.view.Wheel,
+		OnCloseRequest: m.requestClose,
+		OnClosed:       m.shutdown,
+	}
+	config.Paint = m.paint
+	return config
+}
+
 func main() {
 	if !ensureSingleInstance() {
 		return
@@ -1307,19 +1404,7 @@ func main() {
 	m.log("就绪：点击右上角“配置”填写车牌与 Token，然后点“开始监控”")
 	m.startUpdateChecker()
 
-	config := app.Config{
-		Title:          "停车时长监控",
-		Width:          760,
-		Height:         900,
-		MinWidth:       640,
-		MinHeight:      720,
-		Invalidator:    &invalidator,
-		TextInput:      flex.Fields(&m.carnoField, &m.intervalField, &m.freeField, &m.advanceField),
-		OnScroll:       m.view.Wheel,
-		OnCloseRequest: m.requestClose,
-		OnClosed:       m.shutdown,
-	}
-	config.Paint = m.paint
+	config := m.appConfig()
 
 	if err := app.RunApplication(func(application *app.Application) error {
 		var canvas ui.Canvas

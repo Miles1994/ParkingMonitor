@@ -15,6 +15,9 @@ type Config struct {
 	FreeMinutes     int      `json:"free_minutes"`
 	AdvanceSeconds  int      `json:"advance_seconds"`
 	NotifyStyle     string   `json:"notify_style"`
+	RemoteChannel   string   `json:"remote_channel"`
+	PushPlusToken   string   `json:"pushplus_token"`
+	NtfyTopic       string   `json:"ntfy_topic"`
 	CloseAction     string   `json:"close_action"`
 	HistoryCarnos   []string `json:"history_carnos"`
 }
@@ -68,6 +71,20 @@ func normalizeConfig(cfg *Config) {
 	}
 	if cfg.NotifyStyle != "popup" {
 		cfg.NotifyStyle = "side"
+	}
+	cfg.PushPlusToken = strings.TrimSpace(cfg.PushPlusToken)
+	cfg.NtfyTopic = strings.TrimSpace(cfg.NtfyTopic)
+	switch cfg.RemoteChannel {
+	case "pushplus":
+		if cfg.PushPlusToken == "" {
+			cfg.RemoteChannel = ""
+		}
+	case "ntfy":
+		if !ntfyTopicPattern.MatchString(cfg.NtfyTopic) {
+			cfg.RemoteChannel = ""
+		}
+	default:
+		cfg.RemoteChannel = ""
 	}
 	if cfg.CloseAction != "tray" && cfg.CloseAction != "exit" {
 		cfg.CloseAction = ""
