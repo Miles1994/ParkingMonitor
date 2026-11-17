@@ -25,6 +25,7 @@ var (
 	advanceFieldID   = tree.ID(page, "advance")
 	pushTokenFieldID = tree.ID(page, "pushplus-token")
 	ntfyTopicFieldID = tree.ID(page, "ntfy-topic")
+	testRemoteBtnID  = tree.ID(page, "test-remote")
 	saveBtnID        = tree.ID(page, "save")
 	startBtnID       = tree.ID(page, "start")
 	stopBtnID        = tree.ID(page, "stop")
@@ -125,13 +126,14 @@ type model struct {
 	pushTokenField flex.Field
 	ntfyTopicField flex.Field
 
-	intervalSel flex.SelectState
-	freeSel     flex.SelectState
-	unitSel     flex.SelectState
-	regionSel   flex.SelectState
-	unit        int
-	region      int
-	remote      int
+	intervalSel   flex.SelectState
+	freeSel       flex.SelectState
+	unitSel       flex.SelectState
+	regionSel     flex.SelectState
+	unit          int
+	region        int
+	remote        int
+	testingRemote bool
 
 	running        bool
 	status         MonitorStatus
@@ -143,6 +145,8 @@ type model struct {
 	pendingUpdate  *updateInfo
 	updatePrompted bool
 	updating       bool
+	updatePct      int
+	updateVersion  string
 	alertTopmost   bool
 
 	notify     int
@@ -777,15 +781,82 @@ func (m *model) paintForm(f *flex.Frame, theme ui.Theme) {
 			}
 			switch remoteKeys[m.remote] {
 			case "pushplus":
-				f.Field(&m.pushTokenField, pushTokenFieldID, "PushPlus Token", "pushplus.plus → 一对一推送 → 用户 Token")
+				pushToken := strings.TrimSpace(m.pushTokenField.Text())
+				f.Row().Gap(8).Items(flex.Center).Children(func() {
+					f.Field(&m.pushTokenField, pushTokenFieldID, "PushPlus Token", "pushplus.plus → 一对一推送 → 用户 Token").Grow(1)
+					if f.Button(testRemoteBtnID, "发送测试").Outline().
+						Disabled(pushToken == "" || m.testingRemoteNow()).
+						Clicked() {
+						m.sendTestRemote()
+					}
+				})
 				f.Text("关注「pushplus 推送加」公众号即可收到，实名后 200 条/天").FontSize(11).Muted()
 			case "ntfy":
-				f.Field(&m.ntfyTopicField, ntfyTopicFieldID, "ntfy 主题", "例如：parking-zx-9281")
+				ntfyTopic := strings.TrimSpace(m.ntfyTopicField.Text())
+				f.Row().Gap(8).Items(flex.Center).Children(func() {
+					f.Field(&m.ntfyTopicField, ntfyTopicFieldID, "ntfy 主题", "例如：parking-zx-9281").Grow(1)
+					if f.Button(testRemoteBtnID, "发送测试").Outline().
+						Disabled(!ntfyTopicPattern.MatchString(ntfyTopic) || m.testingRemoteNow()).
+						Clicked() {
+						m.sendTestRemote()
+					}
+				})
 				f.Text("手机 ntfy App 订阅同一主题即可收到，公共服务器 ntfy.sh，250 条/天").FontSize(11).Muted()
 			}
 		})
 
 	})
+}
+
+func (m *model) testingRemoteNow() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.testingRemote
+}
+
+// sendTestRemote pushes one message with what is typed right now, so the
+// channel can be verified before the configuration is saved.
+func (m *model) sendTestRemote() {
+	var cfg Config
+	switch remoteKeys[m.remote] {
+	case "pushplus":
+		cfg.RemoteChannel = "pushplus"
+		cfg.PushPlusToken = strings.TrimSpace(m.pushTokenField.Text())
+	case "ntfy":
+		cfg.RemoteChannel = "ntfy"
+		cfg.NtfyTopic = strings.TrimSpace(m.ntfyTopicField.Text())
+	default:
+		return
+	}
+	notifier := newRemoteNotifier(cfg)
+	if notifier == nil {
+		return
+	}
+
+	m.mu.Lock()
+	if m.testingRemote {
+		m.mu.Unlock()
+		return
+	}
+	m.testingRemote = true
+	m.mu.Unlock()
+	m.requestPaint()
+
+	m.log("正在发送测试消息（" + notifier.label() + "）...")
+	go func() {
+		err := notifier.send("停车时长监控测试消息", "这是一条测试消息，收到说明远程通知配置成功。")
+		m.mu.Lock()
+		m.testingRemote = false
+		m.mu.Unlock()
+		m.requestPaint()
+		if err != nil {
+			m.log("测试消息发送失败（" + notifier.label() + "）：" + err.Error())
+			m.showError(err)
+			return
+		}
+		m.log("测试消息已发送（" + notifier.label() + "），请检查手机是否收到")
+		m.showNotice("测试消息已发送，请检查手机是否收到")
+	}()
 }
 
 func (m *model) paintHistoryTags(f *flex.Frame, theme ui.Theme) {
@@ -980,6 +1051,12 @@ func (m *model) paintToast(f *flex.Frame, bounds ui.Rect, theme ui.Theme, toast 
 }
 
 func (m *model) paintStatus(f *flex.Frame, theme ui.Theme, st MonitorStatus) {
+	m.mu.Lock()
+	updating := m.updating
+	updatePct := m.updatePct
+	updateVersion := m.updateVersion
+	m.mu.Unlock()
+
 	f.Column().FillWidth().Background(theme.Card).Border(1, theme.Border).Radius(12).Pad(16).Gap(8).Children(func() {
 		phase := st.Phase
 		if st.Running {
@@ -990,6 +1067,19 @@ func (m *model) paintStatus(f *flex.Frame, theme ui.Theme, st MonitorStatus) {
 			f.Spacer()
 			f.Text(m.configSummary()).Muted().FontSize(12)
 		})
+
+		if updating {
+			f.Row().FillWidth().Items(flex.Center).Gap(12).Children(func() {
+				f.Text("下载中 v" + updateVersion + " · " + strconv.Itoa(updatePct) + "%").Muted().FontSize(12).Width(150)
+				f.Slot().FillWidth().Height(6).Background(theme.Muted).Radius(3).DrawOver(func(d *flex.DrawContext) {
+					progress := d.Rect.Width * float32(updatePct) / 100
+					if progress <= 0 {
+						return
+					}
+					d.Canvas.Rounded(ui.Rect{X: d.Rect.X, Y: d.Rect.Y, Width: progress, Height: d.Rect.Height}, 3, theme.Primary)
+				})
+			})
+		}
 
 		if st.InPark {
 			f.Text("距离 " + strconv.Itoa(m.currentFreeMinutes()) + " 分钟倒计时结束").Muted().Self(flex.Center)

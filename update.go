@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -18,11 +19,27 @@ import (
 )
 
 const (
-	appVersion = "1.2.6"
+	appVersion = "1.2.7"
 	githubRepo = "Miles1994/ParkingMonitor"
 )
 
 var updateClient = &http.Client{Timeout: 30 * time.Second}
+
+// downloadClient fetches the new executable. Files are tens of megabytes and
+// slow links need minutes, so only the connection stages are bounded; a total
+// timeout would abort a transfer that is still making progress.
+var downloadClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   30 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+	},
+}
 
 type updateInfo struct {
 	Version string
@@ -32,9 +49,9 @@ type updateInfo struct {
 
 func (m *model) startUpdateChecker() {
 	go func() {
-		time.Sleep(8 * time.Second)
+		time.Sleep(5 * time.Second)
 		m.checkUpdate()
-		ticker := time.NewTicker(6 * time.Hour)
+		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()
 		for range ticker.C {
 			m.checkUpdate()
@@ -87,23 +104,38 @@ func (m *model) downloadAndUpdate(info *updateInfo) {
 		return
 	}
 	m.updating = true
+	m.updatePct = 0
+	m.updateVersion = info.Version
 	m.mu.Unlock()
+	m.requestPaint()
 
 	m.log("正在下载新版本 v" + info.Version + "...")
 	go func() {
-		path, err := downloadUpdate(info)
+		path, err := downloadUpdate(info, func(percent int) {
+			m.mu.Lock()
+			m.updatePct = percent
+			m.mu.Unlock()
+			if percent%10 == 0 {
+				m.log(fmt.Sprintf("正在下载新版本 v%s... %d%%", info.Version, percent))
+				return
+			}
+			m.requestPaint()
+		})
 		if err != nil {
 			m.mu.Lock()
 			m.updating = false
+			m.updatePrompted = false
 			m.mu.Unlock()
 			m.log("下载更新失败：" + err.Error())
 			m.showError(err)
+			m.retryUpdateCheck()
 			return
 		}
 		m.log("更新已下载，正在重启完成安装")
 		if err := applyUpdate(path); err != nil {
 			m.mu.Lock()
 			m.updating = false
+			m.updatePrompted = false
 			m.mu.Unlock()
 			m.log("启动更新失败：" + err.Error())
 			m.showError(err)
@@ -112,6 +144,13 @@ func (m *model) downloadAndUpdate(info *updateInfo) {
 		m.shutdown()
 		os.Exit(0)
 	}()
+}
+
+// retryUpdateCheck asks again shortly after a failed download, so a user who
+// chose to update is not left waiting for the six-hour tick. The prompt flag
+// was cleared, so a still-relevant update pops up again.
+func (m *model) retryUpdateCheck() {
+	time.AfterFunc(2*time.Minute, m.checkUpdate)
 }
 
 func checkLatestRelease() (*updateInfo, error) {
@@ -155,13 +194,13 @@ func checkLatestRelease() (*updateInfo, error) {
 	return info, nil
 }
 
-func downloadUpdate(info *updateInfo) (string, error) {
+func downloadUpdate(info *updateInfo, progress func(percent int)) (string, error) {
 	if !strings.HasPrefix(info.URL, "https://github.com/"+githubRepo+"/releases/download/") {
 		return "", errors.New("更新地址异常")
 	}
-	resp, err := updateClient.Get(info.URL)
+	resp, err := downloadClient.Get(info.URL)
 	if err != nil {
-		return "", err
+		return "", errors.New("下载更新失败：网络连接超时或中断，请稍后重试")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -173,10 +212,15 @@ func downloadUpdate(info *updateInfo) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if _, err := io.Copy(out, io.LimitReader(resp.Body, 100<<20)); err != nil {
+	body := io.LimitReader(resp.Body, 100<<20)
+	var src io.Reader = body
+	if progress != nil && resp.ContentLength > 0 {
+		src = &progressReader{inner: body, total: resp.ContentLength, last: -1, report: progress}
+	}
+	if _, err := io.Copy(out, src); err != nil {
 		out.Close()
 		os.Remove(path)
-		return "", err
+		return "", errors.New("下载更新中断：网络连接异常，请稍后重试")
 	}
 	if err := out.Close(); err != nil {
 		os.Remove(path)
@@ -201,6 +245,30 @@ func downloadUpdate(info *updateInfo) (string, error) {
 		return "", errors.New("下载的文件不是有效的程序")
 	}
 	return path, nil
+}
+
+// progressReader reports download progress as whole percents, so the status
+// card's bar moves smoothly on a slow link.
+type progressReader struct {
+	inner  io.Reader
+	total  int64
+	done   int64
+	last   int
+	report func(percent int)
+}
+
+func (r *progressReader) Read(p []byte) (int, error) {
+	n, err := r.inner.Read(p)
+	r.done += int64(n)
+	percent := int(r.done * 100 / r.total)
+	if percent > 100 {
+		percent = 100
+	}
+	if percent != r.last {
+		r.last = percent
+		r.report(percent)
+	}
+	return n, err
 }
 
 func applyUpdate(newPath string) error {

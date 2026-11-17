@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/vivaui/viva/app"
@@ -64,5 +65,79 @@ func TestRemoteFieldsTypeAfterSwitchingChannel(t *testing.T) {
 				t.Fatalf("输入后内容为 %q，期望 %q", got, tc.typed)
 			}
 		})
+	}
+}
+
+// 选择远程渠道后出现“发送测试”按钮。
+func TestRemoteTestButtonAppears(t *testing.T) {
+	t.Setenv("APPDATA", t.TempDir())
+	cfg := defaultConfig()
+	cfg.Region = regionList[0].Key
+
+	m := newModel(cfg)
+
+	var canvas ui.Canvas
+	driver, err := app.NewDriver(m.appConfig(), &canvas)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer driver.Close()
+
+	hasTestBtn := func() bool {
+		for _, hit := range driver.Snapshot().Hits {
+			if hit.ID == testRemoteBtnID {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !clickHit(t, driver, configBtnID) {
+		t.Fatal("没有“配置”按钮")
+	}
+	if hasTestBtn() {
+		t.Fatal("未选择渠道时不应出现发送测试按钮")
+	}
+	if !clickHit(t, driver, remoteScope.At(2)) {
+		t.Fatal("没有 ntfy 选项")
+	}
+	if !hasTestBtn() {
+		t.Fatal("切到 ntfy 后没有发送测试按钮")
+	}
+	if !clickHit(t, driver, remoteScope.At(1)) {
+		t.Fatal("没有 PushPlus 选项")
+	}
+	if !hasTestBtn() {
+		t.Fatal("切到 PushPlus 后没有发送测试按钮")
+	}
+}
+
+// 下载中状态卡显示进度行。
+func TestUpdateProgressShownInStatusCard(t *testing.T) {
+	t.Setenv("APPDATA", t.TempDir())
+	cfg := defaultConfig()
+	cfg.Region = regionList[0].Key
+
+	m := newModel(cfg)
+	m.updating = true
+	m.updatePct = 45
+	m.updateVersion = "9.9.9"
+
+	var canvas ui.Canvas
+	driver, err := app.NewDriver(m.appConfig(), &canvas)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer driver.Close()
+
+	found := false
+	for _, text := range driver.Snapshot().Texts {
+		if strings.Contains(text.Value, "下载中 v9.9.9 · 45%") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("状态卡中没有下载进度行")
 	}
 }
