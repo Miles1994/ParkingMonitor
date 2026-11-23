@@ -38,7 +38,6 @@ var (
 	logViewID        = tree.ID(page, "log-view")
 	logClearID       = tree.ID(page, "log-clear")
 	configBtnID      = tree.ID(page, "config")
-	githubLinkID     = tree.ID(page, "github")
 	configCloseID    = tree.ID(page, "config-close")
 
 	intervalScope = tree.Sub(page, tree.Name("interval-select"))
@@ -277,10 +276,10 @@ func (m *model) onEntryAlert(info EntryInfo) {
 func (m *model) onFreeAlert(a AlertInfo) {
 	var msg string
 	if a.Remaining > 0 {
-		msg = fmt.Sprintf("车牌 %s 已停车 %s（入场时间 %s）。\n预计还剩 %s 达到计时时长上限，请及时挪车或缴费。\n地点：%s",
+		msg = fmt.Sprintf("车牌 %s 已停车 %s（入场时间 %s）。\n预计还剩 %s 达到计时时长上限，请及时挪车。\n地点：%s",
 			a.Carno, formatDuration(a.Elapsed), a.Entry.Format("01-02 15:04"), formatDuration(a.Remaining), a.ParkName)
 	} else {
-		msg = fmt.Sprintf("车牌 %s 已停车 %s（入场时间 %s）。\n%d 分钟计时时长已结束，请及时挪车或缴费。\n地点：%s",
+		msg = fmt.Sprintf("车牌 %s 已停车 %s（入场时间 %s）。\n%d 分钟计时时长已结束，请及时挪车。\n地点：%s",
 			a.Carno, formatDuration(a.Elapsed), a.Entry.Format("01-02 15:04"), a.FreeMinutes, a.ParkName)
 	}
 	m.mu.Lock()
@@ -539,7 +538,7 @@ func (m *model) captureToken() {
 			return
 		}
 		m.showInfo("请在微信中操作一次",
-			"代理已启动。请打开“"+region.MiniName+"”小程序，进入“自助缴费”页面点一次“查询缴费”，工具会自动捕获 Token。\n获取成功或 3 分钟后自动关闭代理。")
+			"代理已启动。请打开“"+region.MiniName+"”小程序，进入停车查询页面点一次“查询”，工具会自动捕获 Token。\n获取成功或 3 分钟后自动关闭代理。")
 	}()
 }
 
@@ -593,12 +592,6 @@ func (m *model) paint(canvas *ui.Canvas, size ui.Size) {
 		f.Row().FillWidth().Items(flex.Center).Gap(8).Children(func() {
 			f.Text("停车时长监控").Bold().FontSize(20)
 			f.Text("v" + appVersion).Muted().FontSize(12).Self(flex.Center)
-			if f.Icon(githubIcon).Size(16, 16).Color(theme.MutedForeground).Self(flex.Center).
-				Hit(githubLinkID, "GitHub 仓库").
-				Hover(flex.Look{}.Color(theme.Foreground)).
-				Clicked() {
-				openURL(githubRepoURL)
-			}
 			f.Spacer()
 			if f.Button(startBtnID, "开始监控").Disabled(running).Clicked() {
 				m.startMonitor()
@@ -606,9 +599,9 @@ func (m *model) paint(canvas *ui.Canvas, size ui.Size) {
 			if f.Button(stopBtnID, "停止监控").Outline().Disabled(!running).Clicked() {
 				m.stopMonitor()
 			}
-			if f.Button(paidBtnID, "已缴费").Outline().Disabled(!st.InPark).Clicked() {
+			if f.Button(paidBtnID, "已离场").Outline().Disabled(!st.InPark).Clicked() {
 				m.markPaid()
-				m.showNotice("已标记缴费，监控状态已重置")
+				m.showNotice("已标记离场，监控状态已重置")
 			}
 			if f.Button(configBtnID, "配置").Outline().Clicked() {
 				m.configOpen = true
@@ -618,6 +611,7 @@ func (m *model) paint(canvas *ui.Canvas, size ui.Size) {
 		m.paintStatus(f, theme, st)
 		m.paintStats(f, theme)
 		m.paintLogBar(f)
+		f.Text("本工具仅供交流学习使用，禁止商用，请勿用于任何非法用途。").FontSize(11).Muted()
 	})
 	m.paintConfigDialog(f, theme)
 	m.paintLogDialog(f, theme, logs)
@@ -1320,7 +1314,7 @@ func (m *model) paintDialog(f *flex.Frame, alert *alertState) {
 			return
 		}
 		if alert.kind == alertFree {
-			if f.Button(dialogPaidID, "已缴费").Outline().Clicked() {
+			if f.Button(dialogPaidID, "已离场").Outline().Clicked() {
 				m.markPaid()
 				m.clearAlert()
 			}

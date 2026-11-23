@@ -248,7 +248,7 @@ func (m *Monitor) applyParkingInfo(info ParkingFeeInfo, start time.Time) {
 	ignored := m.ignoredSerial
 	m.mu.Unlock()
 	if info.Serialno != "" && info.Serialno == ignored {
-		m.applyNoRecord(start, "该停车记录已标记为已缴费出场")
+		m.applyNoRecord(start, "该停车记录已标记为已离场")
 		return
 	}
 
@@ -332,7 +332,7 @@ func (m *Monitor) applyNoRecord(at time.Time, detail string) {
 	m.pushStatus()
 }
 
-// MarkPaid 供“已缴费”按钮调用：视为车辆已出场并重置计时状态，
+// MarkPaid 供“已离场”按钮调用：视为车辆已出场并重置计时状态，
 // 同时忽略当前这笔停车记录，避免下一轮轮询又把状态恢复为在停。
 func (m *Monitor) MarkPaid() {
 	m.mu.Lock()
@@ -349,7 +349,7 @@ func (m *Monitor) MarkPaid() {
 	m.elapsed = 0
 	m.remaining = 0
 	m.phase = "已出场"
-	m.detail = "已手动标记缴费，等待下次入场"
+	m.detail = "已手动标记离场，等待下次入场"
 	m.mu.Unlock()
 
 	m.log("已出场，监控状态已重置")

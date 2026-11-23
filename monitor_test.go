@@ -63,7 +63,7 @@ func TestMarkPaidResetsState(t *testing.T) {
 		t.Fatalf("MarkPaid 未重置状态: inPark=%v serial=%q", m.inPark, m.serial)
 	}
 	if m.ignoredSerial != "S1" {
-		t.Fatalf("应忽略已缴费的记录 S1，实际 %q", m.ignoredSerial)
+		t.Fatalf("应忽略已离场的记录 S1，实际 %q", m.ignoredSerial)
 	}
 }
 
@@ -130,11 +130,11 @@ func TestEntryAlertOncePerSerial(t *testing.T) {
 	m.MarkPaid()
 	m.applyParkingInfo(info, now.Add(2*time.Second))
 	if m.inPark {
-		t.Fatal("已缴费记录不应恢复为在停")
+		t.Fatal("已离场记录不应恢复为在停")
 	}
 	select {
 	case <-entries:
-		t.Fatal("已缴费记录不应再次触发入场提醒")
+		t.Fatal("已离场记录不应再次触发入场提醒")
 	case <-time.After(300 * time.Millisecond):
 	}
 

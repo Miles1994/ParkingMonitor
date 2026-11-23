@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	appVersion = "1.2.7"
+	appVersion = "1.2.8"
 	githubRepo = "Miles1994/ParkingMonitor"
 )
 
