@@ -24,6 +24,7 @@ type MonitorStatus struct {
 	Entry     time.Time
 	Elapsed   time.Duration
 	Remaining time.Duration
+	Paused    bool
 	LastQuery time.Time
 	Detail    string
 	ParkName  string
@@ -31,6 +32,7 @@ type MonitorStatus struct {
 }
 
 type AlertInfo struct {
+	MonitorID   string
 	Carno       string
 	ParkName    string
 	Entry       time.Time
@@ -41,6 +43,7 @@ type AlertInfo struct {
 }
 
 type EntryInfo struct {
+	MonitorID   string
 	Carno       string
 	Serial      string
 	Entry       time.Time
@@ -48,25 +51,32 @@ type EntryInfo struct {
 	FreeMinutes int
 }
 
+type parkingClient interface {
+	Query(context.Context, string) (*QueryResult, error)
+}
+
 type Monitor struct {
 	mu     sync.Mutex
-	cfg    Config
-	client *Client
+	id     string
+	cfg    MonitorConfig
+	client parkingClient
+	now    func() time.Time
 	cancel context.CancelFunc
 
-	running    bool
-	inPark     bool
-	entry      time.Time
-	serial     string
-	parkName   string
-	alerted    bool
-	phase      string
-	detail     string
-	lastQuery  time.Time
-	elapsed    time.Duration
-	remaining  time.Duration
-	parkedBase time.Duration
-	parkedAt   time.Time
+	running     bool
+	inPark      bool
+	entry       time.Time
+	serial      string
+	parkName    string
+	alerted     bool
+	phase       string
+	scheduleOff bool
+	detail      string
+	lastQuery   time.Time
+	elapsed     time.Duration
+	remaining   time.Duration
+	parkedBase  time.Duration
+	parkedAt    time.Time
 
 	ignoredSerial      string
 	entryAlertedSerial string
@@ -82,10 +92,12 @@ type Monitor struct {
 	onLog    func(string)
 }
 
-func NewMonitor(cfg Config, onStatus func(MonitorStatus), onAlert func(AlertInfo), onEntry func(EntryInfo), onLog func(string)) *Monitor {
+func NewMonitor(id string, cfg MonitorConfig, onStatus func(MonitorStatus), onAlert func(AlertInfo), onEntry func(EntryInfo), onLog func(string)) *Monitor {
 	m := &Monitor{
+		id:       id,
 		cfg:      cfg,
 		client:   NewClient(cfg.Token, regionByKey(cfg.Region)),
+		now:      time.Now,
 		phase:    "未开始",
 		onStatus: onStatus,
 		onAlert:  onAlert,
@@ -114,6 +126,7 @@ func (m *Monitor) Start() {
 	m.parkName = ""
 	m.alerted = false
 	m.phase = "查询中"
+	m.scheduleOff = false
 	m.detail = ""
 	m.elapsed = 0
 	m.remaining = 0
@@ -131,7 +144,8 @@ func (m *Monitor) Start() {
 	m.mu.Unlock()
 
 	m.pushStatus()
-	m.log(fmt.Sprintf("开始监控：车牌 %s，查询间隔 %d 分钟，计时时长 %d 分钟", cfg.Carno, cfg.IntervalMinutes, cfg.FreeMinutes))
+	m.log(fmt.Sprintf("开始监控：车牌 %s，查询间隔 %d 分钟，计时时长 %d 分钟，监控时段 %s–%s",
+		cfg.Carno, cfg.IntervalMinutes, cfg.FreeMinutes, cfg.MonitorFrom, cfg.MonitorTo))
 
 	go m.loop(ctx)
 	go m.ticker(ctx)
@@ -161,22 +175,55 @@ func (m *Monitor) loop(ctx context.Context) {
 	if interval <= 0 {
 		interval = 10 * time.Minute
 	}
-	m.queryOnce(ctx)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
 	for {
+		m.queryOnce(ctx)
+		delay := interval
+		if now := m.currentTime(); !m.cfg.WithinMonitoringTime(now) {
+			delay = min(interval, m.cfg.timeUntilStart(now))
+		}
+		timer := time.NewTimer(max(delay, time.Second))
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
-			m.queryOnce(ctx)
+		case <-timer.C:
 		}
 	}
 }
 
+func (m *Monitor) currentTime() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
+}
+
+func (c MonitorConfig) timeUntilStart(now time.Time) time.Duration {
+	from, err := parseClockTime(c.MonitorFrom)
+	if err != nil {
+		from = 8 * 60
+	}
+	start := time.Date(now.Year(), now.Month(), now.Day(), from/60, from%60, 0, 0, now.Location())
+	if !start.After(now) {
+		start = start.AddDate(0, 0, 1)
+	}
+	return start.Sub(now)
+}
+
 func (m *Monitor) queryOnce(ctx context.Context) {
 	carno := m.cfg.Carno
-	start := time.Now()
+	start := m.currentTime()
+	m.mu.Lock()
+	running := m.running
+	m.mu.Unlock()
+	if !running || ctx.Err() != nil {
+		return
+	}
+	if !m.cfg.WithinMonitoringTime(start) {
+		m.pauseOutsideSchedule()
+		return
+	}
+	m.resumeMonitoringSchedule()
 
 	res, err := m.client.Query(ctx, carno)
 	if ctx.Err() != nil {
@@ -204,6 +251,19 @@ func (m *Monitor) queryOnce(ctx context.Context) {
 	m.applyParkingInfo(info, start)
 }
 
+func (m *Monitor) pauseOutsideSchedule() {
+	m.mu.Lock()
+	wasPaused := m.scheduleOff
+	m.scheduleOff = true
+	m.phase = "时段外暂停"
+	m.detail = fmt.Sprintf("监控时段 %s–%s，进入时段后自动查询", m.cfg.MonitorFrom, m.cfg.MonitorTo)
+	m.mu.Unlock()
+	if !wasPaused {
+		m.log("当前不在监控时段，暂停查询与倒计时提醒")
+	}
+	m.pushStatus()
+}
+
 // recordFailure 只在首次失败、错误内容变化或每 30 分钟时记录一条，
 // 避免断网时每个轮询周期都往日志里追加相同错误。
 func (m *Monitor) recordFailure(at time.Time, phase, msg string) {
@@ -229,6 +289,12 @@ func (m *Monitor) recordFailure(at time.Time, phase, msg string) {
 		}
 	}
 	m.pushStatus()
+}
+
+func (m *Monitor) resumeMonitoringSchedule() {
+	m.mu.Lock()
+	m.scheduleOff = false
+	m.mu.Unlock()
 }
 
 func (m *Monitor) recoverQuery() {
@@ -298,6 +364,7 @@ func (m *Monitor) applyParkingInfo(info ParkingFeeInfo, start time.Time) {
 
 	if newEntry && m.onEntry != nil {
 		m.onEntry(EntryInfo{
+			MonitorID:   m.id,
 			Carno:       m.cfg.Carno,
 			Serial:      info.Serialno,
 			Entry:       entry,
@@ -366,6 +433,7 @@ func (m *Monitor) ticker(ctx context.Context) {
 		case now := <-tick.C:
 			m.mu.Lock()
 			running := m.running
+			scheduleOff := m.scheduleOff
 			inPark := m.inPark
 			entry := m.entry
 			serial := m.serial
@@ -377,7 +445,7 @@ func (m *Monitor) ticker(ctx context.Context) {
 			advance := time.Duration(m.cfg.AdvanceSeconds) * time.Second
 			m.mu.Unlock()
 
-			if !running || !inPark || entry.IsZero() {
+			if !running || scheduleOff || !inPark || entry.IsZero() {
 				continue
 			}
 			var elapsed time.Duration
@@ -406,6 +474,7 @@ func (m *Monitor) ticker(ctx context.Context) {
 				m.mu.Unlock()
 
 				alert := AlertInfo{
+					MonitorID:   m.id,
 					Carno:       m.cfg.Carno,
 					ParkName:    parkName,
 					Entry:       entry,
@@ -432,6 +501,7 @@ func (m *Monitor) pushStatus() {
 		Entry:     m.entry,
 		Elapsed:   m.elapsed,
 		Remaining: m.remaining,
+		Paused:    m.scheduleOff,
 		LastQuery: m.lastQuery,
 		Detail:    m.detail,
 		ParkName:  m.parkName,

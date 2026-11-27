@@ -2,9 +2,111 @@ package main
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
+
+type recordingParkingClient struct {
+	mu     sync.Mutex
+	carnos []string
+	result *QueryResult
+}
+
+func (c *recordingParkingClient) Query(_ context.Context, carno string) (*QueryResult, error) {
+	c.mu.Lock()
+	c.carnos = append(c.carnos, carno)
+	c.mu.Unlock()
+	return c.result, nil
+}
+
+func (c *recordingParkingClient) calls() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.carnos...)
+}
+
+func TestQueryOnceChecksMonitoringSchedule(t *testing.T) {
+	client := &recordingParkingClient{result: &QueryResult{Status: 1, Data: &FeeData{}}}
+	now := time.Date(2026, 11, 27, 19, 0, 0, 0, time.Local)
+	m := &Monitor{
+		cfg:    MonitorConfig{Carno: "TEST-A", MonitorFrom: "08:00", MonitorTo: "18:00"},
+		client: client, running: true, now: func() time.Time { return now },
+		onStatus: func(MonitorStatus) {}, onLog: func(string) {},
+	}
+	m.queryOnce(context.Background())
+	if len(client.calls()) != 0 {
+		t.Fatal("监控时段外不应调用停车查询接口")
+	}
+	if m.phase != "时段外暂停" {
+		t.Fatalf("时段外状态 = %q", m.phase)
+	}
+
+	now = now.Add(-2 * time.Hour)
+	m.queryOnce(context.Background())
+	calls := client.calls()
+	if len(calls) != 1 || calls[0] != "TEST-A" {
+		t.Fatalf("时段内应查询自己的车牌，实际 %v", calls)
+	}
+	if m.phase != "未在停" {
+		t.Fatalf("恢复查询后状态 = %q", m.phase)
+	}
+}
+
+func TestTwoMonitorsKeepQueriesAndPaidStateIndependent(t *testing.T) {
+	clientA := &recordingParkingClient{result: &QueryResult{Status: 1, Data: &FeeData{}}}
+	clientB := &recordingParkingClient{result: &QueryResult{Status: 1, Data: &FeeData{}}}
+	newMonitor := func(cfg MonitorConfig, client parkingClient) *Monitor {
+		return &Monitor{cfg: cfg, client: client, running: true, now: time.Now,
+			onStatus: func(MonitorStatus) {}, onLog: func(string) {}}
+	}
+	a := newMonitor(MonitorConfig{Carno: "TEST-A", MonitorFrom: "00:00", MonitorTo: "00:00"}, clientA)
+	b := newMonitor(MonitorConfig{Carno: "TEST-B", MonitorFrom: "00:00", MonitorTo: "00:00"}, clientB)
+	b.serial, b.inPark, b.entry = "B-SERIAL", true, time.Now()
+
+	a.queryOnce(context.Background())
+	if len(clientA.calls()) != 1 || len(clientB.calls()) != 0 {
+		t.Fatalf("两个客户端的查询不独立: A=%v B=%v", clientA.calls(), clientB.calls())
+	}
+	a.MarkPaid()
+	if !b.inPark || b.serial != "B-SERIAL" {
+		t.Fatal("标记监控 A 离场不应重置监控 B")
+	}
+}
+
+func TestPausedScheduleDoesNotAdvanceOrAlert(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	alerts := make(chan AlertInfo, 1)
+	now := time.Date(2026, 11, 27, 19, 0, 0, 0, time.Local)
+	m := &Monitor{
+		cfg:     MonitorConfig{Carno: "TEST", FreeMinutes: 15, MonitorFrom: "08:00", MonitorTo: "18:00"},
+		running: true, scheduleOff: true, inPark: true, serial: "S1",
+		entry: now.Add(-15 * time.Minute), parkedBase: 15 * time.Minute, parkedAt: now.Add(-time.Second),
+		onAlert: func(a AlertInfo) { alerts <- a }, onStatus: func(MonitorStatus) {}, onLog: func(string) {},
+	}
+	go m.ticker(ctx)
+	time.Sleep(1200 * time.Millisecond)
+	m.mu.Lock()
+	elapsed := m.elapsed
+	m.mu.Unlock()
+	if elapsed != 0 {
+		t.Fatalf("暂停时段不应推进倒计时，实际 %s", elapsed)
+	}
+	select {
+	case <-alerts:
+		t.Fatal("暂停时段不应触发提醒")
+	default:
+	}
+	m.pauseOutsideSchedule()
+	if !m.scheduleOff {
+		t.Fatal("时段外应标记暂停")
+	}
+	m.resumeMonitoringSchedule()
+	if m.scheduleOff {
+		t.Fatal("进入时段后应取消暂停标记")
+	}
+}
 
 func TestCountdownTriggersAlertOnce(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -12,7 +114,7 @@ func TestCountdownTriggersAlertOnce(t *testing.T) {
 
 	alerts := make(chan AlertInfo, 4)
 	m := &Monitor{
-		cfg:        Config{Carno: "TEST", FreeMinutes: 15},
+		cfg:        MonitorConfig{Carno: "TEST", FreeMinutes: 15},
 		running:    true,
 		inPark:     true,
 		entry:      time.Now().Add(-14*time.Minute - 58*time.Second),
@@ -46,7 +148,7 @@ func TestCountdownTriggersAlertOnce(t *testing.T) {
 
 func TestMarkPaidResetsState(t *testing.T) {
 	m := &Monitor{
-		cfg:      Config{Carno: "TEST", FreeMinutes: 15},
+		cfg:      MonitorConfig{Carno: "TEST", FreeMinutes: 15},
 		onStatus: func(MonitorStatus) {},
 		onLog:    func(string) {},
 	}
@@ -73,7 +175,7 @@ func TestAdvanceTriggersBeforeZero(t *testing.T) {
 
 	alerts := make(chan AlertInfo, 4)
 	m := &Monitor{
-		cfg:        Config{Carno: "TEST", FreeMinutes: 15, AdvanceSeconds: 120},
+		cfg:        MonitorConfig{Carno: "TEST", FreeMinutes: 15, AdvanceSeconds: 120},
 		running:    true,
 		inPark:     true,
 		entry:      time.Now().Add(-13 * time.Minute),
@@ -99,7 +201,7 @@ func TestAdvanceTriggersBeforeZero(t *testing.T) {
 func TestEntryAlertOncePerSerial(t *testing.T) {
 	entries := make(chan EntryInfo, 4)
 	m := &Monitor{
-		cfg:      Config{Carno: "TEST", FreeMinutes: 15},
+		cfg:      MonitorConfig{Carno: "TEST", FreeMinutes: 15},
 		onEntry:  func(e EntryInfo) { entries <- e },
 		onStatus: func(MonitorStatus) {},
 		onLog:    func(string) {},
@@ -171,7 +273,7 @@ func TestAdvanceParse(t *testing.T) {
 
 func TestLeaveResetsState(t *testing.T) {
 	m := &Monitor{
-		cfg:      Config{Carno: "TEST", FreeMinutes: 15},
+		cfg:      MonitorConfig{Carno: "TEST", FreeMinutes: 15},
 		onStatus: func(MonitorStatus) {},
 		onLog:    func(string) {},
 	}

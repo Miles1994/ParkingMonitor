@@ -18,21 +18,13 @@ var (
 	tree = ui.Tree{}
 	page = tree.Feature("main")
 
-	carnoFieldID     = tree.ID(page, "carno")
-	tokenFieldID     = tree.ID(page, "token")
-	intervalFieldID  = tree.ID(page, "interval")
-	freeFieldID      = tree.ID(page, "free")
-	advanceFieldID   = tree.ID(page, "advance")
 	pushTokenFieldID = tree.ID(page, "pushplus-token")
 	ntfyTopicFieldID = tree.ID(page, "ntfy-topic")
 	testRemoteBtnID  = tree.ID(page, "test-remote")
 	saveBtnID        = tree.ID(page, "save")
-	startBtnID       = tree.ID(page, "start")
-	stopBtnID        = tree.ID(page, "stop")
-	paidBtnID        = tree.ID(page, "paid")
-	autoBtnID        = tree.ID(page, "auto")
-	advMinusID       = tree.ID(page, "adv-minus")
-	advPlusID        = tree.ID(page, "adv-plus")
+	startBtnID       = tree.ID(page, "start-all")
+	stopBtnID        = tree.ID(page, "stop-all")
+	addMonitorBtnID  = tree.ID(page, "add-monitor")
 	logAreaID        = tree.ID(page, "log")
 	logScrollID      = tree.ID(page, "log-scroll")
 	logViewID        = tree.ID(page, "log-view")
@@ -40,13 +32,9 @@ var (
 	configBtnID      = tree.ID(page, "config")
 	configCloseID    = tree.ID(page, "config-close")
 
-	intervalScope = tree.Sub(page, tree.Name("interval-select"))
-	freeScope     = tree.Sub(page, tree.Name("free-select"))
-	regionScope   = tree.Sub(page, tree.Name("region-select"))
-	unitScope     = tree.Sub(page, tree.Name("unit-select"))
-	notifyScope   = tree.Sub(page, tree.Name("notify-style"))
-	remoteScope   = tree.Sub(page, tree.Name("remote-channel"))
-	statsScope    = tree.Sub(page, tree.Name("stats-range"))
+	notifyScope  = tree.Sub(page, tree.Name("notify-style"))
+	remoteScope  = tree.Sub(page, tree.Name("remote-channel"))
+	configAreaID = tree.ID(page, "config-scroll")
 
 	logDialogScope   = tree.Sub(page, tree.Name("log-dialog"))
 	logDialogSurface = tree.ID(logDialogScope, "surface")
@@ -72,11 +60,8 @@ var (
 	closeTrayID    = tree.ID(closeScope, "tray")
 	closeDontAskID = tree.ID(closeScope, "dont-ask")
 
-	historyScope       = tree.Sub(page, tree.Name("history"))
-	historyDeleteScope = tree.Sub(page, tree.Name("history-delete"))
-	historyToggleID    = tree.ID(page, "history-toggle")
-	toastUndoID        = tree.ID(page, "toast-undo")
-	toastCloseID       = tree.ID(page, "toast-close")
+	toastUndoID  = tree.ID(page, "toast-undo")
+	toastCloseID = tree.ID(page, "toast-close")
 
 	intervalPresets = []string{"5", "10", "15", "30"}
 	freePresets     = []string{"10", "15", "20", "30", "60"}
@@ -87,6 +72,28 @@ var (
 	remoteKeys      = []string{"", "pushplus", "ntfy"}
 	statsLabels     = []string{"当日", "本周", "本月"}
 )
+
+var trashIcon = ui.Icon{
+	ViewBox: 24,
+	Stroke:  2,
+	Cap:     ui.CapRound,
+	Join:    ui.JoinRound,
+	Commands: []ui.PathCommand{
+		ui.MoveTo(3, 6), ui.LineTo(21, 6),
+		ui.MoveTo(19, 6), ui.LineTo(19, 20),
+		ui.CubicTo(19, 21, 18, 22, 17, 22),
+		ui.LineTo(7, 22),
+		ui.CubicTo(6, 22, 5, 21, 5, 20),
+		ui.LineTo(5, 6),
+		ui.MoveTo(8, 6), ui.LineTo(8, 4),
+		ui.CubicTo(8, 3, 9, 2, 10, 2),
+		ui.LineTo(14, 2),
+		ui.CubicTo(15, 2, 16, 3, 16, 4),
+		ui.LineTo(16, 6),
+		ui.MoveTo(10, 11), ui.LineTo(10, 17),
+		ui.MoveTo(14, 11), ui.LineTo(14, 17),
+	},
+}
 
 type alertKind int
 
@@ -103,6 +110,7 @@ type alertState struct {
 	title   string
 	message string
 	update  *updateInfo
+	monitor string
 }
 
 type toastState struct {
@@ -113,33 +121,155 @@ type toastState struct {
 	total   time.Duration
 }
 
+type monitorForm struct {
+	carnoField    flex.Field
+	intervalField flex.Field
+	freeField     flex.Field
+	advanceField  flex.Field
+	fromField     flex.Field
+	toField       flex.Field
+
+	intervalSel flex.SelectState
+	freeSel     flex.SelectState
+	unitSel     flex.SelectState
+	regionSel   flex.SelectState
+	unit        int
+	region      int
+
+	tokenValue   string
+	pendingToken string
+}
+
+func newMonitorForm(cfg MonitorConfig) monitorForm {
+	form := monitorForm{region: regionIndex(cfg.Region), tokenValue: cfg.Token}
+	form.carnoField.SetText(cfg.Carno)
+	form.intervalField.SetText(strconv.Itoa(cfg.IntervalMinutes))
+	form.freeField.SetText(strconv.Itoa(cfg.FreeMinutes))
+	form.fromField.SetText(cfg.MonitorFrom)
+	form.toField.SetText(cfg.MonitorTo)
+	advance, unit := secondsToAdvance(cfg.AdvanceSeconds)
+	form.advanceField.SetText(strconv.Itoa(advance))
+	if unit == "秒" {
+		form.unit = 1
+	}
+	return form
+}
+
+func (f *monitorForm) collect(index int) (MonitorConfig, error) {
+	label := fmt.Sprintf("监控 %d：", index+1)
+	carno := strings.TrimSpace(f.carnoField.Text())
+	if strings.ContainsAny(carno, " \t\r\n") {
+		return MonitorConfig{}, errors.New(label + "车牌号不能包含空格")
+	}
+	if carno == "" {
+		return MonitorConfig{Region: regionList[f.region].Key, Token: strings.TrimSpace(f.tokenValue)}, nil
+	}
+	if strings.TrimSpace(f.tokenValue) == "" {
+		return MonitorConfig{}, errors.New(label + "请填写 Token")
+	}
+	interval, err := parseIntervalMinutes(f.intervalField.Text())
+	if err != nil {
+		return MonitorConfig{}, fmt.Errorf("%s查询间隔无效：%v", label, err)
+	}
+	free, err := parseFreeMinutes(f.freeField.Text())
+	if err != nil {
+		return MonitorConfig{}, fmt.Errorf("%s计时时长无效：%v", label, err)
+	}
+	advance, err := advanceToSeconds(f.advanceField.Text(), unitLabels[f.unit])
+	if err != nil {
+		return MonitorConfig{}, fmt.Errorf("%s提前提醒无效：%v", label, err)
+	}
+	if advance > free*60 {
+		return MonitorConfig{}, errors.New(label + "提前提醒时间不能大于计时时长")
+	}
+	from := strings.TrimSpace(f.fromField.Text())
+	to := strings.TrimSpace(f.toField.Text())
+	if _, err := parseClockTime(from); err != nil {
+		return MonitorConfig{}, errors.New(label + "开始时间无效，请使用 24 小时制 HH:mm")
+	}
+	if _, err := parseClockTime(to); err != nil {
+		return MonitorConfig{}, errors.New(label + "结束时间无效，请使用 24 小时制 HH:mm")
+	}
+	return MonitorConfig{
+		Region: regionList[f.region].Key, Token: strings.TrimSpace(f.tokenValue), Carno: carno,
+		IntervalMinutes: interval, FreeMinutes: free, AdvanceSeconds: advance,
+		MonitorFrom: from, MonitorTo: to,
+	}, nil
+}
+
+func (f *monitorForm) setConfig(cfg MonitorConfig) {
+	f.region = regionIndex(cfg.Region)
+	f.tokenValue = cfg.Token
+	f.pendingToken = ""
+	f.carnoField.SetText(cfg.Carno)
+	f.intervalField.SetText(strconv.Itoa(cfg.IntervalMinutes))
+	f.freeField.SetText(strconv.Itoa(cfg.FreeMinutes))
+	f.fromField.SetText(cfg.MonitorFrom)
+	f.toField.SetText(cfg.MonitorTo)
+	advance, unit := secondsToAdvance(cfg.AdvanceSeconds)
+	f.advanceField.SetText(strconv.Itoa(advance))
+	f.unit = 0
+	if unit == "秒" {
+		f.unit = 1
+	}
+}
+
+type monitorUI struct {
+	id              string
+	scope           ui.Scope
+	form            monitorForm
+	status          MonitorStatus
+	mon             *Monitor
+	statsRange      int
+	historyExpanded bool
+}
+
+func newMonitorUI(cfg MonitorConfig) *monitorUI {
+	mon := &monitorUI{id: cfg.ID, form: newMonitorForm(cfg)}
+	mon.scope = tree.Sub(page, tree.Name("monitor-"+cfg.ID))
+	mon.status.Phase = "未开始"
+	return mon
+}
+
+func (m *model) monitorIndex(id string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.monitorIndexLocked(id)
+}
+
+func (m *model) monitorExistsLocked(id string) bool {
+	return m.monitorIndexLocked(id) >= 0
+}
+
+func (m *model) monitorIndexLocked(id string) int {
+	for i, mon := range m.monitors {
+		if mon.id == id {
+			return i
+		}
+	}
+	return -1
+}
+
 type model struct {
-	mu sync.Mutex
+	mu       sync.Mutex
+	configMu sync.Mutex
 
 	cfg Config
 
-	carnoField     flex.Field
-	intervalField  flex.Field
-	freeField      flex.Field
-	advanceField   flex.Field
+	monitors []*monitorUI
+
 	pushTokenField flex.Field
 	ntfyTopicField flex.Field
 
-	intervalSel   flex.SelectState
-	freeSel       flex.SelectState
-	unitSel       flex.SelectState
-	regionSel     flex.SelectState
-	unit          int
-	region        int
 	remote        int
 	testingRemote bool
 
-	running        bool
-	status         MonitorStatus
 	logs           []string
 	logsOpen       bool
 	alert          *alertState
 	configOpen     bool
+	deleteConfirm  string
+	pendingDelete  string
 	logScroll      flex.SliderState
 	pendingUpdate  *updateInfo
 	updatePrompted bool
@@ -148,53 +278,42 @@ type model struct {
 	updateVersion  string
 	alertTopmost   bool
 
-	notify     int
-	statsRange int
-	entries    *entryStore
-	logFile    *logFile
+	notify  int
+	entries *entryStore
+	logFile *logFile
 
-	closeConfirm    bool
-	closeDontAsk    bool
-	closeAllow      func()
-	historyExpanded bool
-	toast           *toastState
-	toastID         int
-	window          *app.Window
-	application     *app.Application
-	tray            *app.StatusItem
-
-	tokenValue   string
-	pendingToken string
+	closeConfirm bool
+	closeDontAsk bool
+	closeAllow   func()
+	toast        *toastState
+	toastID      int
+	window       *app.Window
+	application  *app.Application
+	tray         *app.StatusItem
 
 	view        flex.View
 	toastView   flex.View
 	invalidator *app.Invalidator
-	monitor     *Monitor
 	tokenProxy  *TokenProxy
 }
 
 func newModel(cfg Config) *model {
+	normalizeConfig(&cfg)
 	m := &model{cfg: cfg}
-	m.carnoField.SetText(cfg.Carno)
-	m.tokenValue = cfg.Token
-	m.intervalField.SetText(strconv.Itoa(cfg.IntervalMinutes))
-	m.freeField.SetText(strconv.Itoa(cfg.FreeMinutes))
+	for i, cfg := range cfg.Monitors {
+		if cfg.ID == "" {
+			cfg.ID = fmt.Sprintf("monitor-%d", i+1)
+		}
+		m.monitors = append(m.monitors, newMonitorUI(cfg))
+	}
 	m.pushTokenField.SetText(cfg.PushPlusToken)
 	m.ntfyTopicField.SetText(cfg.NtfyTopic)
 	m.remote = remoteIndex(cfg.RemoteChannel)
-
-	advValue, advUnit := secondsToAdvance(cfg.AdvanceSeconds)
-	m.advanceField.SetText(strconv.Itoa(advValue))
-	if advUnit == "秒" {
-		m.unit = 1
-	}
-	m.region = regionIndex(cfg.Region)
 	if cfg.NotifyStyle == "popup" {
 		m.notify = 1
 	}
 	m.entries = loadEntryStore()
 	m.logFile = newLogFile()
-	m.status.Phase = "未开始"
 	return m
 }
 
@@ -222,13 +341,6 @@ func (m *model) log(msg string) {
 	}
 	m.mu.Unlock()
 	m.logFile.write(now, msg)
-	m.requestPaint()
-}
-
-func (m *model) setStatus(st MonitorStatus) {
-	m.mu.Lock()
-	m.status = st
-	m.mu.Unlock()
 	m.requestPaint()
 }
 
@@ -261,7 +373,7 @@ func (m *model) onEntryAlert(info EntryInfo) {
 	msg := fmt.Sprintf("车牌 %s 已入场。\n入场时间：%s\n地点：%s\n计时时长：%d 分钟",
 		info.Carno, info.Entry.Format("2006-01-02 15:04:05"), info.ParkName, info.FreeMinutes)
 	m.mu.Lock()
-	m.alert = &alertState{kind: alertEntry, title: "车辆已入场", message: msg}
+	m.alert = &alertState{kind: alertEntry, title: "车辆已入场", message: msg, monitor: info.MonitorID}
 	m.mu.Unlock()
 	m.log("检测到车辆入场：" + info.Carno)
 	if m.entries.add(info) {
@@ -285,7 +397,7 @@ func (m *model) onFreeAlert(a AlertInfo) {
 	m.mu.Lock()
 	popup := m.cfg.NotifyStyle == "popup"
 	if popup {
-		m.alert = &alertState{kind: alertFree, title: "停车计时即将结束", message: msg}
+		m.alert = &alertState{kind: alertFree, title: "停车计时即将结束", message: msg, monitor: a.MonitorID}
 	}
 	m.mu.Unlock()
 
@@ -333,32 +445,31 @@ func (m *model) showAlertWindow(title, msg string) {
 	}
 }
 
+func (m *model) collectMonitor(id string) (MonitorConfig, error) {
+	index := m.monitorIndex(id)
+	if index < 0 {
+		return MonitorConfig{}, errors.New("监控配置不存在或已删除")
+	}
+	return m.monitors[index].form.collect(index)
+}
+
 func (m *model) collectConfig() (Config, error) {
-	carno := strings.TrimSpace(m.carnoField.Text())
-	token := strings.TrimSpace(m.tokenValue)
-	if carno == "" {
-		return Config{}, errors.New("请填写车牌号")
-	}
-	if strings.ContainsAny(carno, " \t\r\n") {
-		return Config{}, errors.New("车牌号不能包含空格")
-	}
-	if token == "" {
-		return Config{}, errors.New("请填写 Token")
-	}
-	interval, err := parseIntervalMinutes(m.intervalField.Text())
-	if err != nil {
-		return Config{}, fmt.Errorf("查询间隔无效：%v", err)
-	}
-	free, err := parseFreeMinutes(m.freeField.Text())
-	if err != nil {
-		return Config{}, fmt.Errorf("计时时长无效：%v", err)
-	}
-	advance, err := advanceToSeconds(m.advanceField.Text(), unitLabels[m.unit])
-	if err != nil {
-		return Config{}, fmt.Errorf("提前提醒无效：%v", err)
-	}
-	if advance > free*60 {
-		return Config{}, errors.New("提前提醒时间不能大于计时时长")
+	monitors := make([]MonitorConfig, len(m.monitors))
+	seen := make(map[string]int, len(m.monitors))
+	for i := range monitors {
+		cfg, err := m.collectMonitor(m.monitors[i].id)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.ID = m.monitors[i].id
+		monitors[i] = cfg
+		if cfg.Carno == "" {
+			continue
+		}
+		if previous, exists := seen[cfg.Carno]; exists {
+			return Config{}, fmt.Errorf("监控 %d 和监控 %d 的车牌不能相同", previous+1, i+1)
+		}
+		seen[cfg.Carno] = i
 	}
 	remote := remoteKeys[m.remote]
 	pushToken := strings.TrimSpace(m.pushTokenField.Text())
@@ -374,23 +485,17 @@ func (m *model) collectConfig() (Config, error) {
 		}
 	}
 	m.mu.Lock()
-	closeAction := m.cfg.CloseAction
-	history := append([]string(nil), m.cfg.HistoryCarnos...)
+	cfg := m.cfg
 	m.mu.Unlock()
-	return Config{
-		Region:          regionList[m.region].Key,
-		Token:           token,
-		Carno:           carno,
-		IntervalMinutes: interval,
-		FreeMinutes:     free,
-		AdvanceSeconds:  advance,
-		NotifyStyle:     notifyKeys[m.notify],
-		RemoteChannel:   remote,
-		PushPlusToken:   pushToken,
-		NtfyTopic:       ntfyTopic,
-		CloseAction:     closeAction,
-		HistoryCarnos:   history,
-	}, nil
+	cfg.Monitors = monitors
+	cfg.NotifyStyle = notifyKeys[m.notify]
+	cfg.RemoteChannel = remote
+	cfg.PushPlusToken = pushToken
+	cfg.NtfyTopic = ntfyTopic
+	for _, mon := range monitors {
+		cfg.HistoryCarnos = addHistory(cfg.HistoryCarnos, mon.Carno)
+	}
+	return cfg, nil
 }
 
 func addHistory(list []string, carno string) []string {
@@ -411,8 +516,13 @@ func addHistory(list []string, carno string) []string {
 	return out
 }
 
-func (m *model) stepAdvance(delta int) {
-	v, err := strconv.Atoi(strings.TrimSpace(m.advanceField.Text()))
+func (m *model) stepAdvance(id string, delta int) {
+	index := m.monitorIndex(id)
+	if index < 0 {
+		return
+	}
+	field := &m.monitors[index].form.advanceField
+	v, err := strconv.Atoi(strings.TrimSpace(field.Text()))
 	if err != nil {
 		v = 0
 	}
@@ -420,113 +530,364 @@ func (m *model) stepAdvance(delta int) {
 	if v < 0 {
 		v = 0
 	}
-	m.advanceField.SetText(strconv.Itoa(v))
+	field.SetText(strconv.Itoa(v))
 	m.requestPaint()
 }
 
-func (m *model) saveConfigFromForm() {
-	cfg, err := m.collectConfig()
-	if err != nil {
-		m.showError(err)
-		return
-	}
-	cfg.HistoryCarnos = addHistory(cfg.HistoryCarnos, cfg.Carno)
-	if err := saveConfig(cfg); err != nil {
-		m.showError(err)
-		return
-	}
-	m.mu.Lock()
-	m.cfg = cfg
-	m.mu.Unlock()
-	m.log("配置已保存")
-	m.showNotice("配置已保存")
+func (m *model) persistConfig(update func(*Config)) (Config, error) {
+	m.configMu.Lock()
+	defer m.configMu.Unlock()
+	return m.persistConfigLocked(update)
 }
 
-func (m *model) startMonitor() bool {
+// persistConfigLocked 的调用方必须已持有 configMu；保存期间不持有 UI 锁。
+func (m *model) persistConfigLocked(update func(*Config)) (Config, error) {
 	m.mu.Lock()
-	if m.running {
-		m.mu.Unlock()
-		return false
+	cfg := m.cfg
+	m.mu.Unlock()
+	update(&cfg)
+	return cfg, saveConfig(cfg)
+}
+
+func (m *model) saveConfigFromForm() {
+	m.configMu.Lock()
+	defer m.configMu.Unlock()
+	formCfg, err := m.collectConfig()
+	if err != nil {
+		m.showError(err)
+		return
+	}
+	forms := make(map[string]MonitorConfig, len(formCfg.Monitors))
+	for _, mon := range formCfg.Monitors {
+		forms[mon.ID] = mon
+	}
+	cfg, err := m.persistConfigLocked(func(cfg *Config) {
+		for i := range cfg.Monitors {
+			if form, ok := forms[cfg.Monitors[i].ID]; ok {
+				cfg.Monitors[i] = form
+				delete(forms, cfg.Monitors[i].ID)
+			}
+		}
+		for _, mon := range formCfg.Monitors {
+			if form, ok := forms[mon.ID]; ok {
+				cfg.Monitors = append(cfg.Monitors, form)
+				cfg.HistoryCarnos = addHistory(cfg.HistoryCarnos, form.Carno)
+			}
+		}
+		cfg.NotifyStyle = formCfg.NotifyStyle
+		cfg.RemoteChannel = formCfg.RemoteChannel
+		cfg.PushPlusToken = formCfg.PushPlusToken
+		cfg.NtfyTopic = formCfg.NtfyTopic
+	})
+	if err != nil {
+		m.showError(err)
+		return
+	}
+	m.mu.Lock()
+	for _, cfg := range cfg.Monitors {
+		if index := m.monitorIndexLocked(cfg.ID); index >= 0 {
+			m.monitors[index].form.setConfig(cfg)
+		}
+	}
+	m.cfg = cfg
+	m.mu.Unlock()
+	m.showNotice("配置已保存；运行中的监控需重启后生效")
+}
+
+func (m *model) isRunning(id string) bool {
+	index := m.monitorIndex(id)
+	return index >= 0 && m.monitors[index].status.Running
+}
+
+func (m *model) anyRunning() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.monitors {
+		if m.monitors[i].status.Running {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *model) setStatus(id string, st MonitorStatus) {
+	m.mu.Lock()
+	if index := m.monitorIndexLocked(id); index >= 0 {
+		m.monitors[index].status = st
 	}
 	m.mu.Unlock()
+	m.requestPaint()
+}
 
-	cfg, err := m.collectConfig()
+func (m *model) startMonitor(id string) bool {
+	m.configMu.Lock()
+	defer m.configMu.Unlock()
+	index := m.monitorIndex(id)
+	if index < 0 || m.isRunning(id) {
+		return false
+	}
+	monCfg, err := m.collectMonitor(id)
 	if err != nil {
 		m.showError(err)
 		return false
 	}
-	cfg.HistoryCarnos = addHistory(cfg.HistoryCarnos, cfg.Carno)
-	if err := saveConfig(cfg); err != nil {
+	if monCfg.Carno == "" {
+		m.showError(fmt.Errorf("监控 %d：请填写车牌号", index+1))
+		return false
+	}
+
+	cfg, err := m.persistConfigLocked(func(cfg *Config) {
+		found := false
+		for i := range cfg.Monitors {
+			if cfg.Monitors[i].ID == id {
+				cfg.Monitors[i] = monCfg
+				found = true
+				break
+			}
+		}
+		if !found {
+			cfg.Monitors = append(cfg.Monitors, monCfg)
+		}
+		cfg.HistoryCarnos = addHistory(cfg.HistoryCarnos, monCfg.Carno)
+	})
+	if err != nil {
 		m.showError(err)
 		return false
 	}
 
-	mon := NewMonitor(cfg, m.setStatus, m.onFreeAlert, m.onEntryAlert, m.log)
+	mon := NewMonitor(id, monCfg,
+		func(st MonitorStatus) { m.setStatus(id, st) },
+		m.onFreeAlert, m.onEntryAlert, m.log)
 
 	m.mu.Lock()
-	if m.running {
+	index = m.monitorIndexLocked(id)
+	if index < 0 || m.monitors[index].status.Running {
 		m.mu.Unlock()
 		return false
 	}
 	m.cfg = cfg
-	old := m.monitor
-	m.monitor = mon
-	m.running = true
+	for i := range m.monitors {
+		if pending := m.monitors[i].form.pendingToken; pending != "" {
+			m.cfg.Monitors[i].Token = pending
+		}
+	}
+	old := m.monitors[index].mon
+	m.monitors[index].mon = mon
+	m.monitors[index].status.Running = true
 	m.mu.Unlock()
 
 	if old != nil {
 		old.Stop()
 	}
 	mon.Start()
-	keepAwake(true)
+	if m.anyRunning() {
+		keepAwake(true)
+	}
 	m.requestPaint()
 	return true
 }
 
-func (m *model) stopMonitor() {
-	m.mu.Lock()
-	mon := m.monitor
-	m.running = false
-	m.mu.Unlock()
+func (m *model) stopMonitor(id string) {
+	index := m.monitorIndex(id)
+	if index < 0 {
+		return
+	}
+	mon := m.monitors[index].mon
 	if mon != nil {
 		mon.Stop()
 	}
-	keepAwake(false)
+	if !m.anyRunning() {
+		keepAwake(false)
+	}
 	m.requestPaint()
 }
 
-func (m *model) markPaid() {
-	m.mu.Lock()
-	mon := m.monitor
-	m.mu.Unlock()
-	if mon != nil {
+func (m *model) startAllMonitors() {
+	configured := false
+	seen := make(map[string]int)
+	for i := range m.monitors {
+		if m.isRunning(m.monitors[i].id) || strings.TrimSpace(m.monitors[i].form.carnoField.Text()) == "" {
+			continue
+		}
+		monCfg, err := m.collectMonitor(m.monitors[i].id)
+		if err != nil {
+			m.showError(err)
+			continue
+		}
+		if previous, exists := seen[monCfg.Carno]; exists {
+			m.showError(fmt.Errorf("监控 %d 和监控 %d 的车牌相同，请修改后再全部开始", previous+1, i+1))
+			continue
+		}
+		seen[monCfg.Carno] = i
+		configured = true
+		m.startMonitor(m.monitors[i].id)
+	}
+	if !configured && !m.anyRunning() {
+		m.showInfo("提示", "请先在“配置”中填写至少一个监控车牌。")
+	}
+}
+
+func (m *model) stopAllMonitors() {
+	for i := range m.monitors {
+		m.stopMonitor(m.monitors[i].id)
+	}
+}
+
+func (m *model) markPaid(id string) {
+	index := m.monitorIndex(id)
+	if index < 0 {
+		return
+	}
+	if mon := m.monitors[index].mon; mon != nil {
 		mon.MarkPaid()
 	}
 }
 
-func (m *model) captureToken() {
+func (m *model) addMonitor() {
+	m.configMu.Lock()
+	defer m.configMu.Unlock()
+	cfg := defaultMonitorConfig()
+	cfg.ID = fmt.Sprintf("monitor-%d", time.Now().UnixNano())
+	updated, err := m.persistConfigLocked(func(saved *Config) {
+		saved.Monitors = append(saved.Monitors, cfg)
+	})
+	if err != nil {
+		m.showError(err)
+		return
+	}
+	m.mu.Lock()
+	m.cfg = updated
+	m.monitors = append(m.monitors, newMonitorUI(cfg))
+	if m.configOpen {
+		m.view.ScrollState(configAreaID).ScrollToEnd()
+	}
+	m.mu.Unlock()
+	m.log("已新增监控卡片")
+	m.showNotice("已新增监控，请配置车牌和 Token")
+	m.requestPaint()
+}
+
+func (m *model) requestDeleteMonitor(id string) {
+	index := m.monitorIndex(id)
+	if index < 0 {
+		return
+	}
+	if len(m.monitors) <= 1 {
+		m.showInfo("提示", "至少需要保留一个监控卡片。")
+		return
+	}
+	m.deleteConfirm = id
+	m.requestPaint()
+}
+
+func (m *model) cancelDeleteMonitor() {
+	m.deleteConfirm = ""
+	m.requestPaint()
+}
+
+func (m *model) deleteMonitor(id string) bool {
+	m.configMu.Lock()
+	defer m.configMu.Unlock()
+	index := m.monitorIndex(id)
+	if index < 0 || len(m.monitors) <= 1 {
+		return false
+	}
+	mon := m.monitors[index].mon
+	if mon != nil {
+		mon.Stop()
+	}
+	cfg, err := m.persistConfigLocked(func(cfg *Config) {
+		for i := range cfg.Monitors {
+			if cfg.Monitors[i].ID == id {
+				cfg.Monitors = append(cfg.Monitors[:i], cfg.Monitors[i+1:]...)
+				break
+			}
+		}
+	})
+	if err != nil {
+		m.showError(err)
+		return false
+	}
+	m.mu.Lock()
+	index = m.monitorIndexLocked(id)
+	if index < 0 || len(m.monitors) <= 1 {
+		m.mu.Unlock()
+		return false
+	}
+	m.monitors = append(m.monitors[:index], m.monitors[index+1:]...)
+	m.cfg = cfg
+	m.deleteConfirm = ""
+	if m.alert != nil && m.alert.monitor == id {
+		m.alert = nil
+	}
+	m.mu.Unlock()
+	if mon != nil {
+		mon.Stop()
+	}
+	if !m.anyRunning() {
+		keepAwake(false)
+	}
+	m.log("已删除监控卡片")
+	m.showNotice("监控卡片已删除")
+	m.requestPaint()
+	return true
+}
+
+func (m *model) captureToken(id string) {
 	if m.tokenProxy.IsRunning() {
 		m.showInfo("提示", "代理已在运行，请先在微信中完成一次查询。")
 		return
 	}
 
-	region := regionList[m.region]
-	m.log("正在准备本地代理（" + region.Name + "）...")
+	index := m.monitorIndex(id)
+	if index < 0 {
+		return
+	}
+	region := regionList[m.monitors[index].form.region]
+	m.log(fmt.Sprintf("正在准备监控 %d 的本地代理（%s）...", index+1, region.Name))
 	go func() {
 		err := m.tokenProxy.Start(
 			region.Hostname,
 			func(token string) {
+				m.configMu.Lock()
+				defer m.configMu.Unlock()
 				m.mu.Lock()
-				m.pendingToken = token
-				m.cfg.Token = token
-				cfg := m.cfg
+				index := m.monitorIndexLocked(id)
+				exists := index >= 0
 				m.mu.Unlock()
-				if saveErr := saveConfig(cfg); saveErr != nil {
+				if !exists {
+					m.log("Token 获取完成，但对应卡片已删除")
+					m.tokenProxy.Stop()
+					return
+				}
+				cfg, saveErr := m.persistConfigLocked(func(cfg *Config) {
+					for i := range cfg.Monitors {
+						if cfg.Monitors[i].ID == id {
+							cfg.Monitors[i].Token = token
+							break
+						}
+					}
+				})
+				m.mu.Lock()
+				index = m.monitorIndexLocked(id)
+				if index >= 0 {
+					m.monitors[index].form.pendingToken = token
+					m.cfg.Monitors[index].Token = token
+				}
+				exists = index >= 0
+				if saveErr == nil {
+					m.cfg = cfg
+				}
+				m.mu.Unlock()
+				if !exists {
+					m.log("Token 获取完成，但对应卡片已删除")
+				} else if saveErr != nil {
 					m.log("Token 已捕获，但保存失败：" + saveErr.Error())
+					m.showInfo("保存失败", "Token 已填入当前卡片，但写入配置失败。请稍后点“保存全部配置”重试。")
 				} else {
 					m.log("Token 已自动获取并保存")
+					m.showInfo("获取成功", "Token 已填入并保存。")
 				}
-				m.showInfo("获取成功", "Token 已填入并保存。")
 				m.tokenProxy.Stop()
 			},
 			m.log,
@@ -544,11 +905,16 @@ func (m *model) captureToken() {
 
 func (m *model) shutdown() {
 	m.mu.Lock()
-	mon := m.monitor
+	monitors := make([]*Monitor, len(m.monitors))
+	for i := range m.monitors {
+		monitors[i] = m.monitors[i].mon
+	}
 	proxy := m.tokenProxy
 	m.mu.Unlock()
-	if mon != nil {
-		mon.Stop()
+	for _, mon := range monitors {
+		if mon != nil {
+			mon.Stop()
+		}
 	}
 	if proxy != nil {
 		proxy.Stop()
@@ -562,12 +928,23 @@ func (m *model) paint(canvas *ui.Canvas, size ui.Size) {
 	canvas.Fill(bounds, theme.Background)
 
 	m.mu.Lock()
-	st := m.status
-	running := m.running
+	statuses := make([]MonitorStatus, len(m.monitors))
+	for i := range m.monitors {
+		statuses[i] = m.monitors[i].status
+		pending := m.monitors[i].form.pendingToken
+		m.monitors[i].form.pendingToken = ""
+		if pending != "" {
+			m.monitors[i].form.tokenValue = pending
+		}
+	}
+	running := false
+	allRunning := true
+	for i, st := range statuses {
+		running = running || st.Running
+		allRunning = allRunning && (st.Running || strings.TrimSpace(m.monitors[i].form.carnoField.Text()) == "")
+	}
 	logs := append([]string(nil), m.logs...)
 	alert := m.alert
-	pendingToken := m.pendingToken
-	m.pendingToken = ""
 	pendingUpdate := m.pendingUpdate
 	m.pendingUpdate = nil
 	toast := m.toast
@@ -582,10 +959,6 @@ func (m *model) paint(canvas *ui.Canvas, size ui.Size) {
 	}
 	m.mu.Unlock()
 
-	if pendingToken != "" {
-		m.tokenValue = pendingToken
-	}
-
 	f := m.view.Begin(canvas, theme, bounds)
 	f.PopupLayer(10)
 	f.Column().Fill().Pad(20).Gap(12).Children(func() {
@@ -593,23 +966,28 @@ func (m *model) paint(canvas *ui.Canvas, size ui.Size) {
 			f.Text("停车时长监控").Bold().FontSize(20)
 			f.Text("v" + appVersion).Muted().FontSize(12).Self(flex.Center)
 			f.Spacer()
-			if f.Button(startBtnID, "开始监控").Disabled(running).Clicked() {
-				m.startMonitor()
+			if f.Button(startBtnID, "全部开始").Disabled(allRunning).Clicked() {
+				m.startAllMonitors()
 			}
-			if f.Button(stopBtnID, "停止监控").Outline().Disabled(!running).Clicked() {
-				m.stopMonitor()
-			}
-			if f.Button(paidBtnID, "已离场").Outline().Disabled(!st.InPark).Clicked() {
-				m.markPaid()
-				m.showNotice("已标记离场，监控状态已重置")
+			if f.Button(stopBtnID, "全部停止").Outline().Disabled(!running).Clicked() {
+				m.stopAllMonitors()
 			}
 			if f.Button(configBtnID, "配置").Outline().Clicked() {
 				m.configOpen = true
 				m.requestPaint()
 			}
 		})
-		m.paintStatus(f, theme, st)
-		m.paintStats(f, theme)
+		f.ScrollArea(tree.ID(page, "monitor-list")).Grow(1).Shrink(1).Gap(12).Children(func() {
+			for i := range m.monitors {
+				var st MonitorStatus
+				if i < len(statuses) {
+					st = statuses[i]
+				} else {
+					st = m.monitors[i].status
+				}
+				m.paintMonitorCard(f, theme, i, st)
+			}
+		})
 		m.paintLogBar(f)
 		f.Text("本工具仅供交流学习使用，禁止商用，请勿用于任何非法用途。").FontSize(11).Muted()
 	})
@@ -618,6 +996,12 @@ func (m *model) paint(canvas *ui.Canvas, size ui.Size) {
 	m.paintDialog(f, alert)
 	m.paintCloseDialog(f, theme)
 	f.End()
+
+	if m.pendingDelete != "" {
+		id := m.pendingDelete
+		m.pendingDelete = ""
+		m.deleteMonitor(id)
+	}
 
 	if toast != nil {
 		canvas.PushLayer(20)
@@ -645,15 +1029,14 @@ func (m *model) paint(canvas *ui.Canvas, size ui.Size) {
 	}
 }
 
-func (m *model) configSummary() string {
-	region := regionList[m.region].Name
-	carno := strings.TrimSpace(m.carnoField.Text())
+func (m *model) configSummary(index int) string {
+	form := &m.monitors[index].form
+	carno := strings.TrimSpace(form.carnoField.Text())
 	if carno == "" {
-		carno = "未填写车牌"
+		carno = "未配置"
 	}
-	interval := strings.TrimSpace(m.intervalField.Text())
-	free := strings.TrimSpace(m.freeField.Text())
-	return fmt.Sprintf("%s · %s · 每 %s 分钟 · 计时 %s 分钟", region, carno, interval, free)
+	return fmt.Sprintf("%s · %s · 每 %s 分钟 · 计时 %s 分钟",
+		regionList[form.region].Name, carno, strings.TrimSpace(form.intervalField.Text()), strings.TrimSpace(form.freeField.Text()))
 }
 
 func (m *model) paintConfigDialog(f *flex.Frame, theme ui.Theme) {
@@ -661,102 +1044,187 @@ func (m *model) paintConfigDialog(f *flex.Frame, theme ui.Theme) {
 		return
 	}
 	d := f.Dialog(flex.DialogSpec{
-		Title:     "监控配置",
-		Width:     520,
-		Scope:     configSurface,
-		DismissID: configDismiss,
-		CloseID:   configDismiss,
+		Title:       "监控配置",
+		Description: "每张卡片独立查询和计时；车牌留空则不启用。",
+		Width:       680,
+		Height:      max(360, min(float32(760), f.Bounds().Height-32)),
+		Scope:       configSurface,
+		DismissID:   configDismiss,
+		CloseID:     configDismiss,
 	})
 	d.Body(func() {
-		m.paintForm(f, theme)
+		f.ScrollArea(configAreaID).Grow(1).Shrink(1).FillWidth().Children(func() {
+			m.paintForm(f, theme)
+		})
 	})
 	d.Footer(func() {
-		if f.Button(saveBtnID, "保存配置").Clicked() {
+		if f.Button(addMonitorBtnID, "新增卡片").Outline().Clicked() {
+			m.addMonitor()
+		}
+		if f.Button(saveBtnID, "保存全部配置").Clicked() {
 			m.saveConfigFromForm()
 		}
 		if f.Button(configCloseID, "关闭").Outline().Clicked() {
 			m.configOpen = false
+			m.deleteConfirm = ""
 		}
 	})
 	if d.Dismissed() {
 		m.configOpen = false
+		m.deleteConfirm = ""
 	}
 }
 
 func (m *model) paintForm(f *flex.Frame, theme ui.Theme) {
-	f.Column().FillWidth().Gap(10).Children(func() {
-		f.Column().Gap(4).Children(func() {
-			f.Text("地区").FontSize(12).Muted()
-			if i, ok := f.Select(regionScope, &m.regionSel, regionNames, m.region).Picked(); ok {
-				if i != m.region {
-					m.region = i
-					m.tokenValue = ""
-					if m.running {
-						m.stopMonitor()
-					}
-					m.log("已切换到" + regionList[i].Name + "，请点击“点击获取”重新获取 Token")
-				}
+	f.Column().FillWidth().Gap(12).PadSides(2, 6, 2, 2).Children(func() {
+		for i := range m.monitors {
+			m.paintMonitorForm(f, theme, i)
+		}
+		m.paintSharedSettings(f, theme)
+	})
+}
+
+func (m *model) paintMonitorForm(f *flex.Frame, theme ui.Theme, index int) {
+	form := &m.monitors[index].form
+	scope := m.monitors[index].scope
+	regionScope := tree.Sub(scope, tree.Name("region-select"))
+	intervalScope := tree.Sub(scope, tree.Name("interval-select"))
+	freeScope := tree.Sub(scope, tree.Name("free-select"))
+	unitScope := tree.Sub(scope, tree.Name("unit-select"))
+	carnoFieldID := tree.ID(scope, "carno")
+	tokenFieldID := tree.ID(scope, "token")
+	intervalFieldID := tree.ID(scope, "interval")
+	freeFieldID := tree.ID(scope, "free")
+	advanceFieldID := tree.ID(scope, "advance")
+	fromFieldID := tree.ID(scope, "from")
+	toFieldID := tree.ID(scope, "to")
+	autoBtnID := tree.ID(scope, "auto")
+	advMinusID := tree.ID(scope, "adv-minus")
+	advPlusID := tree.ID(scope, "adv-plus")
+
+	f.Column().FillWidth().Background(theme.Card).Border(1, theme.Border).Radius(12).Pad(14).Gap(9).Children(func() {
+		f.Row().FillWidth().Items(flex.Center).Gap(8).Children(func() {
+			f.Text(fmt.Sprintf("监控 %d", index+1)).Bold().FontSize(15)
+			carno := strings.TrimSpace(form.carnoField.Text())
+			if carno != "" {
+				f.Text(carno).Muted().FontSize(12)
+			} else {
+				f.Text("可选，留空不启用").Muted().FontSize(12)
 			}
+			f.Spacer()
+			f.Text(m.configSummary(index)).Muted().FontSize(11).Ellipsis()
+			m.paintDeleteMonitorButton(f, theme, scope, m.monitors[index].id, len(m.monitors) <= 1)
 		})
-
-		f.Column().Gap(4).Children(func() {
-			f.Text("车牌号").FontSize(12).Muted()
-			f.Field(&m.carnoField, carnoFieldID, "车牌号", "例如：京A12345")
-			m.paintHistoryTags(f, theme)
+		if m.deleteConfirm == m.monitors[index].id {
+			f.Row().FillWidth().Background(theme.Muted).Radius(8).PadSides(10, 8, 10, 12).Gap(8).Items(flex.Center).Children(func() {
+				f.Text("删除该监控卡片？").FontSize(12).Color(theme.Danger)
+				f.Text("配置将一并删除，其他监控不受影响").FontSize(11).Muted()
+				f.Spacer()
+				if f.Button(tree.ID(scope, "delete-cancel"), "取消").Outline().Small().Clicked() {
+					m.cancelDeleteMonitor()
+				}
+				if f.Button(tree.ID(scope, "delete-confirm"), "确认删除").Destructive().Small().Clicked() {
+					m.pendingDelete = m.monitors[index].id
+					m.requestPaint()
+				}
+			})
+		}
+		f.Row().FillWidth().Gap(10).Items(flex.End).Children(func() {
+			f.Column().Width(180).Gap(4).Children(func() {
+				f.Text("地区").FontSize(12).Muted()
+				if i, ok := f.Select(regionScope, &form.regionSel, regionNames, form.region).Picked(); ok && i != form.region {
+					form.region = i
+					form.tokenValue = ""
+					if m.isRunning(m.monitors[index].id) {
+						m.stopMonitor(m.monitors[index].id)
+					}
+					m.log(fmt.Sprintf("监控 %d 已切换到%s，请重新获取 Token", index+1, regionList[i].Name))
+				}
+			})
+			f.Column().Grow(1).Shrink(1).Gap(4).Children(func() {
+				f.Text("车牌号").FontSize(12).Muted()
+				f.Field(&form.carnoField, carnoFieldID, "车牌号", "例如：京A12345")
+			})
 		})
-
+		m.paintHistoryTags(f, theme, index)
 		f.Column().Gap(4).Children(func() {
-			f.Text("Token").FontSize(12).Muted()
+			f.Text("Token（每个地区独立获取）").FontSize(12).Muted()
 			f.Row().Gap(8).Items(flex.Center).Children(func() {
 				f.Input(components.InputSnapshot{
-					ID:          tokenFieldID,
-					Label:       "Token",
-					Value:       m.tokenValue,
-					Placeholder: "点击右侧按钮自动获取",
-					ReadOnly:    true,
-					Secure:      true,
+					ID: tokenFieldID, Label: "Token", Value: form.tokenValue,
+					Placeholder: "点击右侧按钮自动获取", ReadOnly: true, Secure: true,
 				}).Grow(1)
 				if f.Button(autoBtnID, "点击获取").Outline().Clicked() {
-					m.captureToken()
+					m.captureToken(m.monitors[index].id)
 				}
 			})
 		})
-
 		f.Column().Gap(4).Children(func() {
-			f.Text("查询间隔（分钟，最低 5）").FontSize(12).Muted()
-			f.Row().Gap(8).Items(flex.Center).Children(func() {
-				f.Field(&m.intervalField, intervalFieldID, "查询间隔", "最低 5").Grow(1)
-				if i, ok := f.Select(intervalScope, &m.intervalSel, intervalPresets, -1).Placeholder("常用值").Width(110).Picked(); ok {
-					m.intervalField.SetText(intervalPresets[i])
-				}
+			f.Text("监控时间段（24 小时制，按本机时间）").FontSize(12).Muted()
+			f.Row().FillWidth().Gap(8).Items(flex.Center).Children(func() {
+				f.Field(&form.fromField, fromFieldID, "监控开始时间", defaultMonitorFrom).Grow(1)
+				f.Text("至").Muted().Self(flex.Center)
+				f.Field(&form.toField, toFieldID, "监控结束时间", defaultMonitorTo).Grow(1)
+				f.Text("支持跨午夜；起止相同为全天").FontSize(11).Muted()
 			})
 		})
-
-		f.Column().Gap(4).Children(func() {
-			f.Text("计时时长（分钟）").FontSize(12).Muted()
-			f.Row().Gap(8).Items(flex.Center).Children(func() {
-				f.Field(&m.freeField, freeFieldID, "计时时长", "默认 15").Grow(1)
-				if i, ok := f.Select(freeScope, &m.freeSel, freePresets, -1).Placeholder("常用值").Width(110).Picked(); ok {
-					m.freeField.SetText(freePresets[i])
-				}
+		f.Row().FillWidth().Gap(10).Items(flex.End).Children(func() {
+			f.Column().Grow(1).Shrink(1).Gap(4).Children(func() {
+				f.Text("查询间隔（分钟，最低 5）").FontSize(12).Muted()
+				f.Row().Gap(6).Items(flex.Center).Children(func() {
+					f.Field(&form.intervalField, intervalFieldID, "查询间隔", "最低 5").Grow(1)
+					if i, ok := f.Select(intervalScope, &form.intervalSel, intervalPresets, -1).Placeholder("常用值").Width(100).Picked(); ok {
+						form.intervalField.SetText(intervalPresets[i])
+					}
+				})
+			})
+			f.Column().Grow(1).Shrink(1).Gap(4).Children(func() {
+				f.Text("计时时长（分钟）").FontSize(12).Muted()
+				f.Row().Gap(6).Items(flex.Center).Children(func() {
+					f.Field(&form.freeField, freeFieldID, "计时时长", "默认 15").Grow(1)
+					if i, ok := f.Select(freeScope, &form.freeSel, freePresets, -1).Placeholder("常用值").Width(100).Picked(); ok {
+						form.freeField.SetText(freePresets[i])
+					}
+				})
 			})
 		})
-
 		f.Column().Gap(4).Children(func() {
 			f.Text("提前提醒").FontSize(12).Muted()
 			f.Row().Gap(8).Items(flex.Center).Children(func() {
-				f.Field(&m.advanceField, advanceFieldID, "提前提醒", "0").Grow(1)
-				if i, ok := f.Select(unitScope, &m.unitSel, unitLabels, m.unit).Width(100).Picked(); ok {
-					m.unit = i
+				f.Field(&form.advanceField, advanceFieldID, "提前提醒", "0").Grow(1)
+				if i, ok := f.Select(unitScope, &form.unitSel, unitLabels, form.unit).Width(100).Picked(); ok {
+					form.unit = i
 				}
 				if f.Button(advMinusID, "-").Outline().Width(36).Clicked() {
-					m.stepAdvance(-1)
+					m.stepAdvance(m.monitors[index].id, -1)
 				}
 				if f.Button(advPlusID, "+").Outline().Width(36).Clicked() {
-					m.stepAdvance(1)
+					m.stepAdvance(m.monitors[index].id, 1)
 				}
 			})
 		})
+	})
+}
+
+func (m *model) paintDeleteMonitorButton(f *flex.Frame, theme ui.Theme, scope ui.Scope, id string, disabled bool) {
+	if disabled {
+		return
+	}
+	color := theme.Danger
+	button := f.ButtonBase(tree.ID(scope, "delete-config"), "删除监控").
+		Size(30, 30).Radius(7).Background(theme.Card).
+		Hover(flex.Look{}.Background(theme.Muted))
+	button.Children(func() {
+		f.Icon(trashIcon).Size(15, 15).Color(color).Self(flex.Center)
+	})
+	if button.Clicked() {
+		m.requestDeleteMonitor(id)
+	}
+}
+
+func (m *model) paintSharedSettings(f *flex.Frame, theme ui.Theme) {
+	f.Column().FillWidth().Background(theme.Card).Border(1, theme.Border).Radius(12).Pad(14).Gap(10).Children(func() {
+		f.Text("共用通知设置").Bold().FontSize(15)
 
 		f.Column().Gap(4).Children(func() {
 			f.Text("倒计时提醒方式").FontSize(12).Muted()
@@ -853,7 +1321,7 @@ func (m *model) sendTestRemote() {
 	}()
 }
 
-func (m *model) paintHistoryTags(f *flex.Frame, theme ui.Theme) {
+func (m *model) paintHistoryTags(f *flex.Frame, theme ui.Theme, index int) {
 	m.mu.Lock()
 	history := append([]string(nil), m.cfg.HistoryCarnos...)
 	m.mu.Unlock()
@@ -863,35 +1331,37 @@ func (m *model) paintHistoryTags(f *flex.Frame, theme ui.Theme) {
 
 	const perRow, rowLimit = 4, 8
 	shown := history
-	if !m.historyExpanded && len(shown) > rowLimit {
+	if !m.monitors[index].historyExpanded && len(shown) > rowLimit {
 		shown = shown[:rowLimit]
 	}
 	for start := 0; start < len(shown); start += perRow {
 		end := min(start+perRow, len(shown))
 		f.Row().Gap(6).Children(func() {
 			for i := start; i < end; i++ {
-				m.paintHistoryTag(f, theme, shown[i])
+				m.paintHistoryTag(f, theme, index, shown[i])
 			}
 		})
 	}
 	if len(history) > rowLimit {
 		label := fmt.Sprintf("展开（%d）", len(history))
-		if m.historyExpanded {
+		if m.monitors[index].historyExpanded {
 			label = "收起"
 		}
-		if f.Button(historyToggleID, label).Ghost().Clicked() {
-			m.historyExpanded = !m.historyExpanded
+		toggleID := tree.ID(m.monitors[index].scope, "history-toggle")
+		if f.Button(toggleID, label).Ghost().Clicked() {
+			m.monitors[index].historyExpanded = !m.monitors[index].historyExpanded
 			m.requestPaint()
 		}
 	}
 }
 
-func (m *model) paintHistoryTag(f *flex.Frame, theme ui.Theme, carno string) {
-	useID := tree.ID(historyScope, carno)
-	deleteID := tree.ID(historyDeleteScope, carno)
+func (m *model) paintHistoryTag(f *flex.Frame, theme ui.Theme, index int, carno string) {
+	scope := m.monitors[index].scope
+	useID := tree.ID(tree.Sub(scope, tree.Name("history")), carno)
+	deleteID := tree.ID(tree.Sub(scope, tree.Name("history-delete")), carno)
 	f.Row().Height(26).Background(theme.Muted).Radius(13).PadSides(0, 6, 0, 10).Gap(6).Items(flex.Center).Children(func() {
 		if f.Text(carno).FontSize(12).Hit(useID, "使用车牌 "+carno).Clicked() {
-			m.carnoField.SetText(carno)
+			m.monitors[index].form.carnoField.SetText(carno)
 			m.requestPaint()
 		}
 		if f.Text("×").FontSize(14).Color(theme.MutedForeground).Hit(deleteID, "删除历史车牌 "+carno).HitOutset(6, 6, 6, 6).Clicked() {
@@ -900,9 +1370,15 @@ func (m *model) paintHistoryTag(f *flex.Frame, theme ui.Theme, carno string) {
 	})
 }
 
+func (m *model) saveConfigFields(update func(*Config)) error {
+	_, err := m.persistConfig(update)
+	return err
+}
+
 func (m *model) deleteHistory(carno string) {
 	m.mu.Lock()
-	list := append([]string(nil), m.cfg.HistoryCarnos...)
+	previous := append([]string(nil), m.cfg.HistoryCarnos...)
+	list := append([]string(nil), previous...)
 	idx := -1
 	for i, v := range list {
 		if v == carno {
@@ -916,10 +1392,14 @@ func (m *model) deleteHistory(carno string) {
 	}
 	list = append(list[:idx], list[idx+1:]...)
 	m.cfg.HistoryCarnos = list
-	cfg := m.cfg
 	m.mu.Unlock()
 
-	if err := saveConfig(cfg); err != nil {
+	if err := m.saveConfigFields(func(cfg *Config) {
+		cfg.HistoryCarnos = list
+	}); err != nil {
+		m.mu.Lock()
+		m.cfg.HistoryCarnos = previous
+		m.mu.Unlock()
 		m.log("保存历史车牌失败：" + err.Error())
 	}
 	m.showToast("已删除历史车牌 "+carno, func() { m.restoreHistory(carno, idx) })
@@ -927,7 +1407,8 @@ func (m *model) deleteHistory(carno string) {
 
 func (m *model) restoreHistory(carno string, idx int) {
 	m.mu.Lock()
-	list := append([]string(nil), m.cfg.HistoryCarnos...)
+	previous := append([]string(nil), m.cfg.HistoryCarnos...)
+	list := append([]string(nil), previous...)
 	exists := false
 	for _, v := range list {
 		if v == carno {
@@ -942,10 +1423,11 @@ func (m *model) restoreHistory(carno string, idx int) {
 		list = append(list[:idx], append([]string{carno}, list[idx:]...)...)
 	}
 	m.cfg.HistoryCarnos = list
-	cfg := m.cfg
 	m.mu.Unlock()
 
-	if err := saveConfig(cfg); err != nil {
+	if err := m.saveConfigFields(func(cfg *Config) {
+		cfg.HistoryCarnos = list
+	}); err != nil {
 		m.log("恢复历史车牌失败：" + err.Error())
 	}
 	m.requestPaint()
@@ -1044,25 +1526,29 @@ func (m *model) paintToast(f *flex.Frame, bounds ui.Rect, theme ui.Theme, toast 
 	})
 }
 
-func (m *model) paintStatus(f *flex.Frame, theme ui.Theme, st MonitorStatus) {
+func (m *model) paintStatus(f *flex.Frame, theme ui.Theme, index int, st MonitorStatus) {
+	form := &m.monitors[index].form
+	scope := m.monitors[index].scope
 	m.mu.Lock()
 	updating := m.updating
 	updatePct := m.updatePct
 	updateVersion := m.updateVersion
 	m.mu.Unlock()
 
-	f.Column().FillWidth().Background(theme.Card).Border(1, theme.Border).Radius(12).Pad(16).Gap(8).Children(func() {
+	f.Column().FillWidth().Background(theme.Card).Border(1, theme.Border).Radius(12).Pad(14).Gap(7).Children(func() {
 		phase := st.Phase
 		if st.Running {
 			phase += " · 监控中"
 		}
-		f.Row().FillWidth().Items(flex.Center).Gap(12).Children(func() {
-			f.Text("状态：" + phase).Bold().FontSize(14)
+		f.Row().FillWidth().Items(flex.Center).Gap(8).Children(func() {
+			f.Text(fmt.Sprintf("监控 %d", index+1)).Bold().FontSize(14)
+			f.Text(phase).FontSize(12).Muted()
 			f.Spacer()
-			f.Text(m.configSummary()).Muted().FontSize(12)
+			f.Text(m.configSummary(index)).Muted().FontSize(11).Ellipsis()
 		})
+		f.Text(fmt.Sprintf("监控时段 %s–%s", form.fromField.Text(), form.toField.Text())).FontSize(11).Muted()
 
-		if updating {
+		if updating && index == 0 {
 			f.Row().FillWidth().Items(flex.Center).Gap(12).Children(func() {
 				f.Text("下载中 v" + updateVersion + " · " + strconv.Itoa(updatePct) + "%").Muted().FontSize(12).Width(150)
 				f.Slot().FillWidth().Height(6).Background(theme.Muted).Radius(3).DrawOver(func(d *flex.DrawContext) {
@@ -1076,72 +1562,92 @@ func (m *model) paintStatus(f *flex.Frame, theme ui.Theme, st MonitorStatus) {
 		}
 
 		if st.InPark {
-			f.Text("距离 " + strconv.Itoa(m.currentFreeMinutes()) + " 分钟倒计时结束").Muted().Self(flex.Center)
-
+			label := "距离 " + strconv.Itoa(m.currentFreeMinutes(index)) + " 分钟倒计时结束"
+			if st.Paused {
+				label = "倒计时已随查询暂停"
+			}
+			f.Text(label).Muted().Self(flex.Center)
 			countdown := formatRemaining(st.Remaining)
-			txt := f.Text(countdown).FontSize(46).Bold().Self(flex.Center)
+			txt := f.Text(countdown).FontSize(38).Bold().Self(flex.Center)
 			if st.Remaining <= 0 {
 				txt.Color(theme.Danger)
 			} else {
 				txt.Color(theme.Success)
 			}
-
-			f.Row().Gap(48).Children(func() {
-				f.Text("入场时间：" + st.Entry.Format("2006-01-02 15:04:05")).Width(230)
-				f.Text("已停时长：" + formatDuration(st.Elapsed)).Width(180)
+			f.Row().Gap(28).Children(func() {
+				f.Text("入场时间：" + st.Entry.Format("2006-01-02 15:04:05")).Width(245)
+				f.Text("已停时长：" + formatDuration(st.Elapsed))
 			})
-			if !st.LastQuery.IsZero() {
-				f.Text("上次查询：" + st.LastQuery.Format("15:04:05")).Muted()
-			}
-			if st.Detail != "" {
-				f.Text(st.Detail).Muted()
-			}
 		} else {
-			f.Text("--:--").FontSize(46).Bold().Muted().Self(flex.Center)
-			f.Row().Gap(48).Children(func() {
-				f.Text("入场时间：-").Muted().Width(230)
-				f.Text("已停时长：-").Muted().Width(180)
+			f.Text("--:--").FontSize(38).Bold().Muted().Self(flex.Center)
+			f.Row().Gap(28).Children(func() {
+				f.Text("入场时间：-").Muted().Width(245)
+				f.Text("已停时长：-").Muted()
 			})
-			if !st.LastQuery.IsZero() {
-				f.Text("上次查询：" + st.LastQuery.Format("15:04:05")).Muted()
-			}
-			if st.Detail != "" {
-				f.Text(st.Detail).Muted()
-			}
 		}
+		if !st.LastQuery.IsZero() {
+			f.Text("上次查询：" + st.LastQuery.Format("15:04:05")).Muted().FontSize(12)
+		}
+		if st.Detail != "" {
+			f.Text(st.Detail).Muted().FontSize(12)
+		}
+		f.Row().FillWidth().Items(flex.Center).Gap(8).Children(func() {
+			if f.Button(tree.ID(scope, "start"), "开始").Disabled(st.Running).Clicked() {
+				m.startMonitor(m.monitors[index].id)
+			}
+			if f.Button(tree.ID(scope, "stop"), "停止").Outline().Disabled(!st.Running).Clicked() {
+				m.stopMonitor(m.monitors[index].id)
+			}
+			if f.Button(tree.ID(scope, "paid"), "已离场").Outline().Disabled(!st.InPark).Clicked() {
+				m.markPaid(m.monitors[index].id)
+				m.showNotice(fmt.Sprintf("监控 %d 已标记离场", index+1))
+			}
+			f.Spacer()
+			f.Text("每张卡片独立运行").Muted().FontSize(11)
+		})
 	})
 }
 
-func (m *model) currentFreeMinutes() int {
-	if v, err := strconv.Atoi(strings.TrimSpace(m.freeField.Text())); err == nil && v > 0 {
+func (m *model) currentFreeMinutes(index int) int {
+	if v, err := strconv.Atoi(strings.TrimSpace(m.monitors[index].form.freeField.Text())); err == nil && v > 0 {
 		return v
 	}
 	return 15
 }
 
-func (m *model) paintStats(f *flex.Frame, theme ui.Theme) {
-	carno := strings.TrimSpace(m.carnoField.Text())
-	buckets := buildChartBuckets(m.entries.snapshot(), carno, m.statsRange, time.Now())
-	f.Column().FillWidth().Grow(1).Shrink(1).MinHeight(220).Background(theme.Card).Border(1, theme.Border).Radius(12).Pad(16).Gap(8).Children(func() {
+func (m *model) paintStats(f *flex.Frame, theme ui.Theme, index int) {
+	carno := strings.TrimSpace(m.monitors[index].form.carnoField.Text())
+	buckets := buildChartBuckets(m.entries.snapshot(), carno, m.monitors[index].statsRange, time.Now())
+	statsScope := tree.Sub(m.monitors[index].scope, tree.Name("stats-range"))
+	f.Column().FillWidth().Gap(6).Children(func() {
 		f.Row().FillWidth().Items(flex.Center).Gap(8).Children(func() {
-			f.Text("入场统计").Bold().FontSize(14)
+			f.Text("入场统计").Bold().FontSize(13)
 			label := carno
 			if label == "" {
-				label = "未填写车牌"
+				label = "未配置"
 			}
 			f.Text(label).Muted().FontSize(12)
 			f.Spacer()
-			if i, ok := f.Choice(statsScope, statsLabels, m.statsRange).ChosenIndex(); ok {
-				m.statsRange = i
+			if i, ok := f.Choice(statsScope, statsLabels, m.monitors[index].statsRange).ChosenIndex(); ok {
+				m.monitors[index].statsRange = i
 				m.requestPaint()
 			}
 		})
-		f.Slot().FillWidth().Grow(1).Shrink(1).MinHeight(160).DrawOver(func(d *flex.DrawContext) {
+		f.Slot().FillWidth().Height(138).DrawOver(func(d *flex.DrawContext) {
 			paintEntryChart(d, theme, buckets)
 		})
 	})
 }
 
+func (m *model) paintMonitorCard(f *flex.Frame, theme ui.Theme, index int, st MonitorStatus) {
+	f.Column().FillWidth().Background(theme.Card).Border(1, theme.Border).Radius(12).Pad(2).Gap(0).Children(func() {
+		m.paintStatus(f, theme, index, st)
+		f.Slot().FillWidth().Height(1).Background(theme.Border).MarginX(14)
+		f.Column().FillWidth().Pad(12).Children(func() {
+			m.paintStats(f, theme, index)
+		})
+	})
+}
 func paintEntryChart(d *flex.DrawContext, theme ui.Theme, buckets []chartBucket) {
 	rect := d.Rect
 	if rect.Width < 40 || rect.Height < 40 {
@@ -1315,7 +1821,7 @@ func (m *model) paintDialog(f *flex.Frame, alert *alertState) {
 		}
 		if alert.kind == alertFree {
 			if f.Button(dialogPaidID, "已离场").Outline().Clicked() {
-				m.markPaid()
+				m.markPaid(alert.monitor)
 				m.clearAlert()
 			}
 		}
@@ -1404,9 +1910,10 @@ func (m *model) rememberCloseAction(action string) {
 	m.mu.Lock()
 	m.cfg.CloseAction = action
 	m.closeDontAsk = false
-	cfg := m.cfg
 	m.mu.Unlock()
-	if err := saveConfig(cfg); err != nil {
+	if err := m.saveConfigFields(func(cfg *Config) {
+		cfg.CloseAction = action
+	}); err != nil {
 		m.log("保存关闭行为失败：" + err.Error())
 	}
 }
@@ -1454,18 +1961,25 @@ func (m *model) quitFromTray() {
 	}
 }
 
+func (m *model) textInputs(context app.TextInputContext) *app.TextInput {
+	fields := []*flex.Field{&m.pushTokenField, &m.ntfyTopicField}
+	for i := range m.monitors {
+		form := &m.monitors[i].form
+		fields = append(fields, &form.carnoField, &form.intervalField, &form.freeField,
+			&form.advanceField, &form.fromField, &form.toField)
+	}
+	return flex.Fields(fields...)(context)
+}
+
 func (m *model) appConfig() app.Config {
 	config := app.Config{
-		Title:       "停车时长监控",
-		Width:       760,
-		Height:      900,
-		MinWidth:    640,
-		MinHeight:   720,
-		Invalidator: m.invalidator,
-		TextInput: flex.Fields(
-			&m.carnoField, &m.intervalField, &m.freeField, &m.advanceField,
-			&m.pushTokenField, &m.ntfyTopicField,
-		),
+		Title:          "停车时长监控",
+		Width:          760,
+		Height:         900,
+		MinWidth:       640,
+		MinHeight:      720,
+		Invalidator:    m.invalidator,
+		TextInput:      m.textInputs,
 		OnScroll:       m.view.Wheel,
 		OnCloseRequest: m.requestClose,
 		OnClosed:       m.shutdown,
